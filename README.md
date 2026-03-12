@@ -23,7 +23,6 @@ WAVY is a live audio social platform where users can:
 1. **Prerequisites**
    - Flutter SDK 3.10.1+
    - Android Studio / Xcode
-   - WAVY Backend running
 
 2. **Install dependencies**
    ```bash
@@ -39,6 +38,14 @@ WAVY is a live audio social platform where users can:
    ```bash
    flutter run -d chrome
    ```
+
+## 🌐 Backend Configuration
+
+The app is configured to connect to AWS backend:
+
+**Backend URL**: `http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com`
+
+Configuration file: `lib/core/config/app_config.dart`
 
 ## 📱 Features
 
@@ -105,6 +112,7 @@ Using **Provider** pattern:
 - `flutter_webrtc` - Audio streaming
 - `just_audio` - Audio playback
 - `provider` - State management
+- `livekit_client` - WebRTC voice
 
 ### UI & Utils
 - `flutter_animate` - Smooth animations
@@ -118,15 +126,6 @@ Using **Provider** pattern:
 3. **Listeners** join wave and receive audio stream
 4. **Real-time** sync ensures everyone hears the same thing
 5. **Mic invitations** allow voice interaction
-
-## 🔧 Configuration
-
-The app automatically detects the platform and uses the correct backend URL:
-- **Web**: `http://localhost:3000`
-- **Android Emulator**: `http://10.0.2.2:3000`
-- **iOS Simulator**: `http://localhost:3000`
-
-For production, update the URL in `lib/core/socket/socket_service.dart`.
 
 ## 🚀 Build for Production
 
@@ -144,6 +143,11 @@ flutter build ios --release
 ```bash
 flutter build web --release
 ```
+
+## 📚 Documentation
+
+- **AWS Deployment**: See `AWS_ALB_DEPLOYMENT.md`
+- **Backend Repository**: [wavy-backend](https://github.com/pachecograu/wavy-backend)
 
 ---
 
