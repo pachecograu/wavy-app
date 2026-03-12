@@ -1,15 +1,10 @@
 import 'package:flutter/foundation.dart';
 
 class AppConfig {
-  static String get backendUrl {
-    if (kIsWeb) {
-      return 'http://localhost:3000';
-    } else {
-      // Android - use localhost for emulator, IP for physical device
-      return 'http://10.0.2.2:3000'; // Android emulator
-      // return 'http://192.168.1.11:3000'; // Physical device
-    }
-  }
+  // AWS Application Load Balancer URL (producción)
+  static const String _productionUrl = 'http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com';
+  
+  static String get backendUrl => _productionUrl;
   
   // Socket.IO para realtime
   static String get socketUrl => backendUrl;
@@ -19,15 +14,8 @@ class AppConfig {
   static String get hlsStreamUrl => '$backendUrl/hls';
   
   // WebRTC para voz (LiveKit)
-  static String get liveKitUrl {
-    if (kIsWeb) {
-      return 'ws://localhost:7880';
-    } else {
-      // Android - use localhost for emulator, IP for physical device
-      return 'ws://10.0.2.2:7880'; // Android emulator
-      // return 'ws://192.168.1.11:7880'; // Physical device
-    }
-  }
+  // El backend retorna la URL correcta en el token
+  static String get liveKitUrl => 'ws://wavy-alb-1189004548.us-east-1.elb.amazonaws.com:7880';
   
   // Configuración de audio
   static const String musicFormat = 'aac'; // AAC para música
