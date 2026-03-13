@@ -1,7 +1,7 @@
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 class SocketService {
-  static const String serverUrl = 'http://10.0.2.2:3001';
+  static const String serverUrl = 'http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com';
   late IO.Socket socket;
   
   void connect() {

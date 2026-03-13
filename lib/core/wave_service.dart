@@ -25,7 +25,7 @@ class Wave {
 }
 
 class WaveService {
-  static const String baseUrl = 'http://10.0.2.2:3001/api';
+  static const String baseUrl = 'http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com/api';
   
   Future<List<Wave>> getWaves() async {
     // Simulate API call - replace with actual HTTP request
