@@ -1,6 +1,7 @@
 class Track {
   final String title;
   final String artist;
+  final String? url;
   final int? duration;
   final bool isCurrent;
   final DateTime playedAt;
@@ -8,6 +9,7 @@ class Track {
   Track({
     required this.title,
     required this.artist,
+    this.url,
     this.duration,
     required this.isCurrent,
     required this.playedAt,
@@ -27,6 +29,7 @@ class Track {
       return Track(
         title: data['title']?.toString() ?? '',
         artist: data['artist']?.toString() ?? '',
+        url: data['url']?.toString(),
         duration: (data['duration'] as num?)?.toInt(),
         isCurrent: data['isCurrent'] == true,
         playedAt: DateTime.tryParse(data['playedAt']?.toString() ?? '') ?? DateTime.now(),

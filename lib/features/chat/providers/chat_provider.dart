@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../../../core/socket/socket_service.dart';
-
 class Message {
   final String id;
   final String userId;
@@ -78,7 +77,7 @@ class ChatProvider with ChangeNotifier {
         _publicMessages = List<Message>.from(_publicMessages)..add(message);
         notifyListeners();
       } catch (e) {
-        print('Error parsing public-message data: $e');
+        debugPrint('Error parsing public-message data: $e');
       }
     });
     
@@ -90,7 +89,7 @@ class ChatProvider with ChangeNotifier {
         _privateMessages = List<Message>.from(_privateMessages)..add(message);
         notifyListeners();
       } catch (e) {
-        print('Error parsing private-message data: $e');
+        debugPrint('Error parsing private-message data: $e');
       }
     });
   }

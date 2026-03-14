@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart';
-
 class AppConfig {
   // AWS Application Load Balancer URL (producción)
   static const String _productionUrl = 'http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com';

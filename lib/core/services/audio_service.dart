@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import '../config/app_config.dart';
 
@@ -12,23 +13,22 @@ class AudioService {
   Future<void> startMusicStream(String roomId) async {
     try {
       final hlsUrl = '${AppConfig.hlsStreamUrl}/$roomId/index.m3u8';
-      print('🎵 Starting HLS stream: $hlsUrl');
-      
+      debugPrint('🎵 Starting HLS stream: $hlsUrl');
+
       await _musicPlayer.setUrl(hlsUrl);
       await _musicPlayer.play();
       _isMusicPlaying = true;
-      
-      print('🎵 HLS stream started successfully');
+
+      debugPrint('🎵 HLS stream started successfully');
     } catch (e) {
-      print('❌ Error starting music stream: $e');
-      // Fallback: try with test audio
+      debugPrint('❌ Error starting music stream: $e');
       try {
         await _musicPlayer.setAsset('assets/music/test.mp3');
         await _musicPlayer.play();
         _isMusicPlaying = true;
-        print('🎵 Fallback audio started');
+        debugPrint('🎵 Fallback audio started');
       } catch (fallbackError) {
-        print('❌ Fallback also failed: $fallbackError');
+        debugPrint('❌ Fallback also failed: $fallbackError');
         throw Exception('Error starting music stream: $e');
       }
     }
@@ -37,7 +37,7 @@ class AudioService {
   Future<void> stopMusicStream() async {
     await _musicPlayer.stop();
     _isMusicPlaying = false;
-    print('🎵 Music stream stopped');
+    debugPrint('🎵 Music stream stopped');
   }
 
   Future<void> setMusicVolume(double volume) async {
@@ -45,7 +45,7 @@ class AudioService {
   }
 
   bool get isMusicPlaying => _isMusicPlaying;
-  
+
   Stream<Duration> get positionStream => _musicPlayer.positionStream;
   Stream<PlayerState> get playerStateStream => _musicPlayer.playerStateStream;
 

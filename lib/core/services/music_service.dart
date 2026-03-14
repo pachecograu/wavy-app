@@ -1,71 +1,61 @@
-import 'package:flutter/services.dart';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:http/http.dart' as http;
+import '../config/app_config.dart';
 import '../models/track.dart';
 
 class MusicService {
   static final AudioPlayer _audioPlayer = AudioPlayer();
   static Track? _currentTrack;
-  
+  static List<Track> _s3Tracks = [];
+
   static Track? get currentTrack => _currentTrack;
   static AudioPlayer get audioPlayer => _audioPlayer;
-  
-  static Future<List<String>> getLocalMusicFiles() async {
+  static List<Track> get s3Tracks => _s3Tracks;
+
+  static Future<List<Track>> fetchTracks() async {
     try {
-      // Lista manual de archivos conocidos
-      const musicFiles = [
-        'assets/music/deadpool.mpeg',
-      ];
-      
-      List<String> availableFiles = [];
-      for (String file in musicFiles) {
-        try {
-          await rootBundle.load(file);
-          availableFiles.add(file);
-        } catch (e) {
-          // Archivo no existe, continuar
-        }
+      final res = await http.get(Uri.parse('${AppConfig.apiUrl}/music'));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        _s3Tracks = (data['tracks'] as List).map((t) => Track(
+          title: t['title'] ?? 'Unknown',
+          artist: 'WAVY',
+          url: t['url'],
+          isCurrent: false,
+          playedAt: DateTime.now(),
+        )).toList();
       }
-      
-      return availableFiles;
     } catch (e) {
-      return [];
+      debugPrint('Error fetching S3 tracks: $e');
     }
+    return _s3Tracks;
   }
-  
-  static Future<void> playLocalMusic(String assetPath, String title, String artist, {bool isStreaming = false}) async {
+
+  static Future<void> playTrack(Track track) async {
     try {
-      await _audioPlayer.setAsset(assetPath);
+      if (track.url == null) return;
+      await _audioPlayer.setUrl(track.url!);
       await _audioPlayer.play();
       _currentTrack = Track(
-        title: title,
-        artist: artist,
+        title: track.title,
+        artist: track.artist,
+        url: track.url,
         isCurrent: true,
         playedAt: DateTime.now(),
       );
-      
-      print('Playing music: $title by $artist');
+      debugPrint('Playing: ${track.title} from S3');
     } catch (e) {
-      print('Error playing music: $e');
+      debugPrint('Error playing track: $e');
     }
   }
-  
 
-  
-  static Future<void> stopMusicAndStreaming() async {
-    await _audioPlayer.stop();
-    _currentTrack = null;
-  }
-  
   static Future<void> stopMusic() async {
     await _audioPlayer.stop();
     _currentTrack = null;
   }
-  
-  static Future<void> pauseMusic() async {
-    await _audioPlayer.pause();
-  }
-  
-  static Future<void> resumeMusic() async {
-    await _audioPlayer.play();
-  }
+
+  static Future<void> pauseMusic() async => await _audioPlayer.pause();
+  static Future<void> resumeMusic() async => await _audioPlayer.play();
 }

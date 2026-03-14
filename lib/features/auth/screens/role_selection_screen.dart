@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import '../../../core/theme/wavy_theme.dart';
 import '../../wave/screens/wave_home_screen.dart';
 
@@ -9,139 +10,62 @@ class RoleSelectionScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              WavyTheme.darkBackground,
-              Color(0xFF1A0A0A),
-              WavyTheme.darkBackground,
+        width: double.infinity,
+        height: double.infinity,
+        color: WavyTheme.darkBackground,
+        child: SafeArea(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.headphones, size: 180, color: WavyTheme.primaryRed)
+                  .animate(onPlay: (c) => c.repeat(reverse: true))
+                  .shimmer(duration: 7000.ms, color: WavyTheme.primaryRed.withValues(alpha: 0.3)),
+              const SizedBox(height: 12),
+              Text(
+                'WAVY',
+                style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                      color: WavyTheme.primaryRed,
+                      fontSize: 30,
+                      fontWeight: FontWeight.w700,
+                    ),
+              ).animate().fadeIn(duration: 400.ms),
+              const SizedBox(height: 50),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 40),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton.icon(
+                    onPressed: () => _navigate(context, UserRole.oyente),
+                    icon: const Icon(Icons.headphones, size: 18),
+                    label: const Text('MODO OYENTE', style: TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ).animate().slideY(begin: 1, duration: 400.ms, delay: 200.ms).fadeIn(),
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 40),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton.icon(
+                    onPressed: () => _navigate(context, UserRole.emisor),
+                    icon: const Icon(Icons.person, size: 18),
+                    label: const Text('MODO DJ', style: TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ).animate().slideY(begin: 1, duration: 400.ms, delay: 400.ms).fadeIn(),
             ],
           ),
         ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(20.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // Logo
-                Text(
-                  'WAVY',
-                  style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                    color: WavyTheme.primaryRed,
-                    fontSize: 48,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Live Audio Social Platform',
-                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                    color: WavyTheme.textSecondary,
-                  ),
-                ),
-                const SizedBox(height: 60),
-                
-                // Role selection
-                Text(
-                  '¿Cómo quieres entrar?',
-                  style: Theme.of(context).textTheme.headlineMedium,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 40),
-                
-                // EMISOR button
-                SizedBox(
-                  width: double.infinity,
-                  height: 80,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      Navigator.pushReplacement(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const WaveHomeScreen(initialRole: UserRole.emisor),
-                        ),
-                      );
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: WavyTheme.primaryRed,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.radio, size: 32, color: Colors.white),
-                        const SizedBox(height: 8),
-                        Text(
-                          'EMISOR',
-                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                        Text(
-                          'Transmitir música',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: Colors.white70,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                
-                const SizedBox(height: 20),
-                
-                // OYENTE button
-                SizedBox(
-                  width: double.infinity,
-                  height: 80,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      Navigator.pushReplacement(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const WaveHomeScreen(initialRole: UserRole.oyente),
-                        ),
-                      );
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: WavyTheme.cardBackground,
-                      side: BorderSide(color: WavyTheme.primaryRed.withOpacity(0.5)),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.headphones, size: 32, color: WavyTheme.primaryRed),
-                        const SizedBox(height: 8),
-                        Text(
-                          'OYENTE',
-                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                            fontWeight: FontWeight.bold,
-                            color: WavyTheme.primaryRed,
-                          ),
-                        ),
-                        Text(
-                          'Escuchar música',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: WavyTheme.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
       ),
+    );
+  }
+
+  void _navigate(BuildContext context, UserRole role) {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => WaveHomeScreen(initialRole: role)),
     );
   }
 }

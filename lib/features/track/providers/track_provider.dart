@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../../../core/socket/socket_service.dart';
 import '../../../core/models/track.dart';
-
 class TrackProvider with ChangeNotifier {
   final SocketService _socketService = SocketService();
   
@@ -45,7 +44,7 @@ class TrackProvider with ChangeNotifier {
         
         notifyListeners();
       } catch (e) {
-        print('Error parsing current-track-updated data: $e');
+        debugPrint('Error parsing current-track-updated data: $e');
       }
     });
     
@@ -71,7 +70,7 @@ class TrackProvider with ChangeNotifier {
           notifyListeners();
         }
       } catch (e) {
-        print('Error parsing wave-tracks data: $e');
+        debugPrint('Error parsing wave-tracks data: $e');
       }
     });
   }
