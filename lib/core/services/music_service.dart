@@ -1,8 +1,7 @@
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:http/http.dart' as http;
-import '../config/app_config.dart';
+import 'package:xml/xml.dart' as xml;
 import '../models/track.dart';
 
 class MusicService {
@@ -10,22 +9,42 @@ class MusicService {
   static Track? _currentTrack;
   static List<Track> _s3Tracks = [];
 
+  static const String _bucketUrl =
+      'https://wavy-music-372714114281.s3.us-east-1.amazonaws.com';
+
   static Track? get currentTrack => _currentTrack;
   static AudioPlayer get audioPlayer => _audioPlayer;
   static List<Track> get s3Tracks => _s3Tracks;
 
   static Future<List<Track>> fetchTracks() async {
     try {
-      final res = await http.get(Uri.parse('${AppConfig.apiUrl}/music'));
+      final res = await http.get(Uri.parse('$_bucketUrl/'));
       if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        _s3Tracks = (data['tracks'] as List).map((t) => Track(
-          title: t['title'] ?? 'Unknown',
-          artist: 'WAVY',
-          url: t['url'],
-          isCurrent: false,
-          playedAt: DateTime.now(),
-        )).toList();
+        final doc = xml.XmlDocument.parse(res.body);
+        final ns = doc.rootElement.name.namespaceUri;
+
+        _s3Tracks = doc.rootElement
+            .findAllElements('Contents', namespace: ns)
+            .map((node) {
+              final key = node.getElement('Key', namespace: ns)?.innerText ?? '';
+              if (key.isEmpty) return null;
+              final title = Uri.decodeComponent(key.split('/').last)
+                  .replaceAll(RegExp(r'\.[^.]+$'), '');
+              return Track(
+                title: title,
+                artist: 'WAVY',
+                url: '$_bucketUrl/$key',
+                isCurrent: false,
+                playedAt: DateTime.now(),
+              );
+            })
+            .whereType<Track>()
+            .where((t) => t.url!.toLowerCase().endsWith('.mp3') ||
+                t.url!.toLowerCase().endsWith('.aac') ||
+                t.url!.toLowerCase().endsWith('.m4a') ||
+                t.url!.toLowerCase().endsWith('.wav') ||
+                t.url!.toLowerCase().endsWith('.ogg'))
+            .toList();
       }
     } catch (e) {
       debugPrint('Error fetching S3 tracks: $e');
