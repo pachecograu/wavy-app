@@ -62,13 +62,21 @@ class ChatProvider with ChangeNotifier {
   List<Message> get publicMessages => _publicMessages;
   List<Message> get privateMessages => _privateMessages;
   
+  bool _listenersRegistered = false;
+
   void initialize(String waveId, String userId) {
+    if (_currentWaveId == waveId && _listenersRegistered) return;
     _currentWaveId = waveId;
     _userId = userId;
-    _setupSocketListeners();
+    if (!_listenersRegistered) {
+      _listenersRegistered = true;
+      _setupSocketListeners();
+    }
   }
   
   void _setupSocketListeners() {
+    _socketService.off('public-message');
+    _socketService.off('private-message');
     _socketService.on('public-message', (data) {
       try {
         final jsonString = jsonEncode(data);

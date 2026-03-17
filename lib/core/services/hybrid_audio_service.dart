@@ -39,13 +39,8 @@ class HybridAudioService {
 
   void _setupSocketListeners() {
     _socketService.on('hybrid_room_joined', (data) async {
-      if (_currentRoomId != null) {
-        try {
-          await _audioService.startMusicStream(_currentRoomId!);
-        } catch (e) {
-          debugPrint('⚠️ Could not start HLS stream: $e');
-        }
-      }
+      // HLS disabled — listeners play directly from S3 via track URL
+      debugPrint('🌊 Joined hybrid room (HLS skipped, using S3 direct)');
     });
 
     _socketService.on('voice_token_granted', (data) async {

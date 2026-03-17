@@ -31,7 +31,8 @@ class WaveProvider with ChangeNotifier {
       _initialized = true;
       _setupSocketListeners();
     }
-    // Always try to load waves
+    // Always refresh waves list
+    _onlineWaves = [];
     if (_socketService.isConnected) {
       _loadOnlineWaves();
     } else {
@@ -260,8 +261,10 @@ class WaveProvider with ChangeNotifier {
 
   Future<void> stopWave() async {
     if (_currentWave != null && _isOwner) {
+      final waveId = _currentWave!.id;
       await stopStreaming();
-      _socketService.emit('stop-wave', {'waveId': _currentWave!.id, 'userId': _userId});
+      _socketService.emit('stop-wave', {'waveId': waveId, 'userId': _userId});
+      _onlineWaves = _onlineWaves.where((w) => w.id != waveId).toList();
       _currentWave = null;
       _isOwner = false;
       _emisorState = EmisorState.offline;

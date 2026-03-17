@@ -1,6 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:audio_service/audio_service.dart';
 import 'core/theme/wavy_theme.dart';
+import 'core/services/wavy_audio_handler.dart';
+import 'core/services/music_service.dart';
+import 'core/services/notification_service.dart';
 import 'features/wave/providers/wave_provider.dart';
 import 'features/auth/providers/auth_provider.dart';
 import 'features/chat/providers/chat_provider.dart';
@@ -9,7 +14,30 @@ import 'features/voice/providers/voice_provider.dart';
 import 'features/quality/providers/quality_provider.dart';
 import 'features/auth/screens/role_selection_screen.dart';
 
-void main() {
+class WavyHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback = (cert, host, port) => true;
+  }
+}
+
+Future<void> main() async {
+  HttpOverrides.global = WavyHttpOverrides();
+  WidgetsFlutterBinding.ensureInitialized();
+
+  final handler = await AudioService.init(
+    builder: () => WavyAudioHandler(MusicService.audioPlayer),
+    config: AudioServiceConfig(
+      androidNotificationChannelId: 'com.wavy.audio',
+      androidNotificationChannelName: 'WAVY Audio',
+      androidNotificationOngoing: false,
+      androidStopForegroundOnPause: true,
+    ),
+  );
+  MusicService.setHandler(handler);
+  await NotificationService.init();
+
   runApp(const WavyApp());
 }
 

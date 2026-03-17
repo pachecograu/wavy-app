@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../../../core/socket/socket_service.dart';
 import '../../../core/models/track.dart';
+import '../../../core/services/music_service.dart';
 class TrackProvider with ChangeNotifier {
   final SocketService _socketService = SocketService();
   
@@ -12,12 +13,17 @@ class TrackProvider with ChangeNotifier {
   Track? get currentTrack => _currentTrack;
   List<Track> get playedTracks => _playedTracks;
   
+  bool _listenersRegistered = false;
+
   void initialize(String waveId) {
     if (_currentWaveId == waveId) {
-      return; // Already initialized for this wave
+      return;
     }
     _currentWaveId = waveId;
-    _setupSocketListeners();
+    if (!_listenersRegistered) {
+      _listenersRegistered = true;
+      _setupSocketListeners();
+    }
     _loadWaveTracks();
   }
   
@@ -27,9 +33,12 @@ class TrackProvider with ChangeNotifier {
         final jsonString = jsonEncode(data);
         final trackData = jsonDecode(jsonString) as Map<String, dynamic>;
         
+        final url = trackData['url']?.toString();
+        
         _currentTrack = Track(
           title: trackData['title']?.toString() ?? '',
           artist: trackData['artist']?.toString() ?? '',
+          url: url,
           duration: trackData['duration'] as int?,
           isCurrent: true,
           playedAt: DateTime.tryParse(trackData['playedAt']?.toString() ?? '') ?? DateTime.now(),
@@ -40,6 +49,11 @@ class TrackProvider with ChangeNotifier {
             t.title == _currentTrack!.title && 
             t.artist == _currentTrack!.artist)) {
           _playedTracks = List<Track>.from(_playedTracks)..insert(0, _currentTrack!);
+        }
+        
+        // Auto-play for listeners: if URL is present, play from S3
+        if (url != null && url.isNotEmpty) {
+          MusicService.playTrack(_currentTrack!);
         }
         
         notifyListeners();
@@ -67,6 +81,12 @@ class TrackProvider with ChangeNotifier {
               : null;
           
           _playedTracks = tracks;
+          
+          // Auto-play current track for listeners joining mid-session
+          if (_currentTrack?.url != null && _currentTrack!.url!.isNotEmpty) {
+            MusicService.playTrack(_currentTrack!);
+          }
+          
           notifyListeners();
         }
       } catch (e) {
@@ -83,13 +103,14 @@ class TrackProvider with ChangeNotifier {
     }
   }
   
-  void updateCurrentTrack(String title, String artist, {int? duration}) {
+  void updateCurrentTrack(String title, String artist, {int? duration, String? url}) {
     if (_currentWaveId != null) {
       _socketService.emit('update-current-track', {
         'waveId': _currentWaveId,
         'title': title,
         'artist': artist,
         'duration': duration,
+        'url': url,
       });
       _socketService.emit('log-action', {
         'action': 'TRACK_CHANGED',

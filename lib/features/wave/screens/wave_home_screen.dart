@@ -2,20 +2,25 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:file_picker/file_picker.dart';
 import '../../../core/theme/wavy_theme.dart';
 import '../../../core/services/music_service.dart';
 import '../../../core/models/track.dart';
 import '../../../core/services/hybrid_audio_service.dart';
+import '../../../core/services/notification_service.dart';
+import '../../../core/services/playback_sync_service.dart';
 import '../providers/wave_provider.dart';
 import '../widgets/wave_list.dart';
 import '../widgets/wave_info_card.dart';
 import '../widgets/audio_stream_widget.dart';
+import '../widgets/particle_background.dart';
 import '../../auth/screens/role_selection_screen.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../track/providers/track_provider.dart';
 import '../../chat/providers/chat_provider.dart';
 import '../../chat/widgets/chat_panel.dart';
 import '../../voice/providers/voice_provider.dart';
+import '../../quality/providers/quality_provider.dart';
 
 class WaveHomeScreen extends StatefulWidget {
   final UserRole? initialRole;
@@ -32,6 +37,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   String? _selectedSong;
   bool _isPlaying = false;
   bool _transmittingMic = false;
+  bool _useCloudStorage = true;
   Duration _position = Duration.zero;
   // Chat notification (like AudiShare messageNotify)
   String? _chatNotifyText;
@@ -41,6 +47,9 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   StreamSubscription<PlayerState>? _stateSub;
   HybridAudioService? _hybrid;
   late AnimationController _rippleController;
+  bool _chatNotifyListening = false;
+  bool _reconnectListening = false;
+  bool _appInForeground = true;
 
   @override
   void initState() {
@@ -63,47 +72,48 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     _stateSub = MusicService.audioPlayer.playerStateStream.listen((s) {
       if (mounted) setState(() => _isPlaying = s.playing);
     });
+
+    // Wire notification skip buttons
+    final handler = MusicService.handler;
+    if (handler != null) {
+      handler.onSkipNext = () => _skipTrack(1);
+      handler.onSkipPrevious = () => _skipTrack(-1);
+    }
+  }
+
+  void _skipTrack(int direction) {
+    final tracks = MusicService.s3Tracks;
+    if (tracks.isEmpty) return;
+    final currentIdx = tracks.indexWhere((t) => t.url == _selectedSong);
+    final nextIdx = (currentIdx + direction).clamp(0, tracks.length - 1);
+    final track = tracks[nextIdx];
+    setState(() => _selectedSong = track.url);
+    context.read<TrackProvider>().updateCurrentTrack(track.title, track.artist, url: track.url);
+    MusicService.playTrack(track);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _offlineSync();
     _rippleController.dispose();
     _chatNotifyTimer?.cancel();
     _posSub?.cancel();
     _durSub?.cancel();
     _stateSub?.cancel();
-    _hybrid?.leaveRoom();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) _goOffline();
-  }
-
-  void _offlineSync() {
-    try {
-      final wp = context.read<WaveProvider>();
-      if (_currentRole == UserRole.emisor && wp.currentWave != null) {
-        MusicService.stopMusic();
-      } else if (_currentRole == UserRole.oyente && wp.currentWave != null) {
-        wp.leaveWave();
+    if (state == AppLifecycleState.resumed) {
+      _appInForeground = true;
+      final auth = context.read<AuthProvider>();
+      if (auth.userId != null) {
+        context.read<WaveProvider>().initialize(auth.userId!);
       }
-    } catch (_) {}
-  }
-
-  Future<void> _goOffline() async {
-    try {
-      final wp = context.read<WaveProvider>();
-      if (_currentRole == UserRole.emisor && wp.currentWave != null) {
-        if (wp.isStreaming) await wp.stopStreaming();
-        await wp.stopWave();
-      } else if (_currentRole == UserRole.oyente && wp.currentWave != null) {
-        await wp.leaveWave();
-      }
-    } catch (_) {}
+    } else if (state == AppLifecycleState.paused) {
+      _appInForeground = false;
+    }
   }
 
   void _startTransmitting() async {
@@ -129,11 +139,14 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       context.read<ChatProvider>().initialize(waveId, userId);
       context.read<TrackProvider>().initialize(waveId);
       context.read<VoiceProvider>().initialize(waveId, userId, isOwner: true);
+      PlaybackSyncService.startAsDJ(waveId);
       _listenChatNotifications();
     }
   }
 
   void _listenChatNotifications() {
+    if (_chatNotifyListening) return;
+    _chatNotifyListening = true;
     final chat = context.read<ChatProvider>();
     chat.addListener(() {
       if (!mounted) return;
@@ -147,6 +160,9 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       _chatNotifyTimer = Timer(const Duration(milliseconds: 2500), () {
         if (mounted) setState(() => _chatNotifyText = null);
       });
+      if (!_appInForeground) {
+        NotificationService.showChatNotification(last.message);
+      }
     });
   }
 
@@ -236,6 +252,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       if (confirmed != true) return;
     }
     await MusicService.stopMusic();
+    PlaybackSyncService.stop();
     if (_currentRole == UserRole.emisor && wp.currentWave != null) {
       if (wp.isStreaming) await wp.stopStreaming();
       await wp.stopWave();
@@ -258,6 +275,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
             children: [
               // Background
               Container(color: WavyTheme.darkBackground),
+              const ParticleBackground(),
               // Main layout (header + content + footer)
               SafeArea(
                 child: Column(
@@ -649,6 +667,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
               final ratio = details.localPosition.dx / box.size.width;
               final seekTo = Duration(milliseconds: (duration.inMilliseconds * ratio).toInt());
               MusicService.audioPlayer.seek(seekTo);
+              PlaybackSyncService.emitSeek();
             }
           },
           child: Container(
@@ -670,7 +689,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
           child: Row(
             children: [
               IconButton(
-                onPressed: () {},
+                onPressed: () => _skipTrack(-1),
                 icon: const Icon(Icons.skip_previous, color: WavyTheme.textPrimary, size: 22),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
@@ -691,7 +710,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
                 ),
               ),
               IconButton(
-                onPressed: () {},
+                onPressed: () => _skipTrack(1),
                 icon: const Icon(Icons.skip_next, color: WavyTheme.textPrimary, size: 22),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
@@ -732,12 +751,9 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       child: Row(
         children: [
           IconButton(
-            onPressed: () {
-              // toggle play/stop for listener
-            },
+            onPressed: () {},
             icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, color: WavyTheme.textPrimary, size: 24),
           ),
-          // Volume
           const Icon(Icons.volume_down, color: WavyTheme.textSecondary, size: 16),
           SizedBox(
             width: 80,
@@ -753,7 +769,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
             ),
           ),
           const Icon(Icons.volume_up, color: WavyTheme.textSecondary, size: 16),
-          const SizedBox(width: 12),
+          const SizedBox(width: 8),
           Text(_fmt(_position), style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 12)),
           if (wp.currentWave != null) ...[
             const Text(' | ', style: TextStyle(color: WavyTheme.textSecondary, fontSize: 12)),
@@ -765,11 +781,33 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
               ),
             ),
           ],
-          // Leave button
+          // Bitrate monitor
+          Consumer<QualityProvider>(
+            builder: (_, qp, __) {
+              final label = qp.localBitrate > 0
+                  ? '${qp.localBitrate} kbits/s'
+                  : 'Conectando';
+              return Text(
+                label,
+                style: TextStyle(
+                  color: qp.localBufferHealth == 'poor'
+                      ? Colors.red
+                      : qp.localBufferHealth == 'fair'
+                          ? Colors.orange
+                          : WavyTheme.textSecondary,
+                  fontSize: 10,
+                ),
+              );
+            },
+          ),
+          const SizedBox(width: 4),
           TextButton(
             onPressed: () {
               wp.leaveWave();
               context.read<TrackProvider>().clearTracks();
+              context.read<QualityProvider>().clear();
+              PlaybackSyncService.stop();
+              MusicService.stopMusic();
             },
             child: const Text('Salir', style: TextStyle(color: WavyTheme.primaryRed, fontSize: 12)),
           ),
@@ -847,87 +885,169 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
           ),
           // Song list
           Expanded(
-            child: FutureBuilder<List<Track>>(
-              future: MusicService.fetchTracks(),
-              builder: (context, snap) {
-                if (!snap.hasData || snap.data!.isEmpty) {
-                  return const Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.library_music, size: 60, color: WavyTheme.textSecondary),
-                        SizedBox(height: 8),
-                        Text('No hay canciones', style: TextStyle(color: WavyTheme.textSecondary)),
-                      ],
-                    ),
-                  );
-                }
-                return ListView.builder(
-                  itemCount: snap.data!.length,
-                  itemBuilder: (context, i) {
-                    final track = snap.data![i];
-                    final playing = _selectedSong == track.url;
-                    return GestureDetector(
-                      onTap: () async {
-                        setState(() => _selectedSong = track.url);
-                        context.read<TrackProvider>().updateCurrentTrack(track.title, track.artist);
-                        await MusicService.playTrack(track);
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.all(14),
-                        color: i.isOdd ? WavyTheme.itemBgOdd : WavyTheme.itemBgEven,
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 30,
-                              height: 30,
-                              margin: const EdgeInsets.only(right: 12),
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(color: WavyTheme.textPrimary),
-                              ),
-                              child: Icon(
-                                playing ? Icons.stop : Icons.play_arrow,
-                                size: 16,
-                                color: WavyTheme.cornflowerBlue,
-                              ),
-                            ),
-                            Expanded(
-                              child: Text(
-                                track.title,
-                                style: TextStyle(
-                                  color: playing ? WavyTheme.primaryRed : WavyTheme.textPrimary,
-                                  fontSize: 13,
-                                  fontWeight: playing ? FontWeight.bold : FontWeight.normal,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
+            child: _useCloudStorage ? _buildCloudSongList() : _buildLocalSongList(),
           ),
-          // Footer
-          Container(
-            height: 56,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: const BoxDecoration(boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 3)]),
-            child: const Row(
-              children: [
-                Icon(Icons.archive, color: WavyTheme.textPrimary, size: 16),
-                SizedBox(width: 6),
-                Text('Almacenamiento: ', style: TextStyle(color: WavyTheme.textFaded, fontSize: 13)),
-                Text('LOCAL', style: TextStyle(color: WavyTheme.cornflowerBlue, fontSize: 13)),
-              ],
+          // Footer - toggle almacenamiento
+          GestureDetector(
+            onTap: () => setState(() {
+              _useCloudStorage = !_useCloudStorage;
+            }),
+            child: Container(
+              height: 56,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: const BoxDecoration(boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 3)]),
+              child: Row(
+                children: [
+                  Icon(
+                    _useCloudStorage ? Icons.cloud : Icons.archive,
+                    color: WavyTheme.textPrimary,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 6),
+                  const Text('Almacenamiento: ', style: TextStyle(color: WavyTheme.textFaded, fontSize: 13)),
+                  Text(
+                    _useCloudStorage ? 'NUBE (S3)' : 'LOCAL',
+                    style: const TextStyle(color: WavyTheme.cornflowerBlue, fontSize: 13),
+                  ),
+                  const Spacer(),
+                  const Icon(Icons.swap_horiz, color: WavyTheme.textSecondary, size: 16),
+                ],
+              ),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  // ─── SONG LISTS ───
+  Widget _buildCloudSongList() {
+    return FutureBuilder<List<Track>>(
+      future: MusicService.fetchTracks(),
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator(color: WavyTheme.primaryRed));
+        }
+        if (snap.hasError) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.cloud_off, size: 60, color: Colors.red),
+                  const SizedBox(height: 8),
+                  const Text('Error al cargar canciones de S3', style: TextStyle(color: Colors.red, fontSize: 14)),
+                  const SizedBox(height: 4),
+                  Text('${snap.error}', style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 11), textAlign: TextAlign.center),
+                  const SizedBox(height: 12),
+                  ElevatedButton(onPressed: () => setState(() {}), child: const Text('Reintentar')),
+                ],
+              ),
+            ),
+          );
+        }
+        if (!snap.hasData || snap.data!.isEmpty) {
+          return const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.cloud_queue, size: 60, color: WavyTheme.textSecondary),
+                SizedBox(height: 8),
+                Text('No hay canciones en S3', style: TextStyle(color: WavyTheme.textSecondary)),
+              ],
+            ),
+          );
+        }
+        return _buildTrackListView(snap.data!);
+      },
+    );
+  }
+
+  Widget _buildLocalSongList() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.folder_open, size: 60, color: WavyTheme.textSecondary),
+          const SizedBox(height: 8),
+          const Text('Selecciona archivos locales', style: TextStyle(color: WavyTheme.textSecondary)),
+          const SizedBox(height: 12),
+          ElevatedButton.icon(
+            onPressed: () async {
+              final tp = context.read<TrackProvider>();
+              final result = await FilePicker.platform.pickFiles(
+                type: FileType.audio,
+                allowMultiple: false,
+              );
+              if (result != null && result.files.isNotEmpty) {
+                final file = result.files.first;
+                final track = Track(
+                  title: file.name.replaceAll(RegExp(r'\.[^.]+$'), ''),
+                  artist: 'Local',
+                  url: file.path,
+                  isCurrent: false,
+                  playedAt: DateTime.now(),
+                );
+                tp.updateCurrentTrack(track.title, track.artist, url: track.url);
+                await MusicService.playTrack(track);
+              }
+            },
+            icon: const Icon(Icons.audio_file, size: 16),
+            label: const Text('Elegir archivo'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTrackListView(List<Track> tracks) {
+    return ListView.builder(
+      itemCount: tracks.length,
+      itemBuilder: (context, i) {
+        final track = tracks[i];
+        final playing = _selectedSong == track.url;
+        return GestureDetector(
+          onTap: () async {
+            setState(() => _selectedSong = track.url);
+            context.read<TrackProvider>().updateCurrentTrack(track.title, track.artist, url: track.url);
+            await MusicService.playTrack(track);
+          },
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            color: i.isOdd ? WavyTheme.itemBgOdd : WavyTheme.itemBgEven,
+            child: Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  margin: const EdgeInsets.only(right: 12),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: WavyTheme.textPrimary),
+                  ),
+                  child: Icon(
+                    playing ? Icons.stop : Icons.play_arrow,
+                    size: 16,
+                    color: WavyTheme.cornflowerBlue,
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    track.title,
+                    style: TextStyle(
+                      color: playing ? WavyTheme.primaryRed : WavyTheme.textPrimary,
+                      fontSize: 13,
+                      fontWeight: playing ? FontWeight.bold : FontWeight.normal,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -969,7 +1089,26 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       context.read<TrackProvider>().initialize(waveId);
       context.read<ChatProvider>().initialize(waveId, userId);
       context.read<VoiceProvider>().initialize(waveId, userId, isOwner: false);
+      context.read<QualityProvider>().initialize(waveId, userId, isOwner: false);
+      PlaybackSyncService.startAsListener(waveId);
       _listenChatNotifications();
+      _listenEmisorReconnect();
+    });
+  }
+
+  void _listenEmisorReconnect() {
+    if (_reconnectListening) return;
+    _reconnectListening = true;
+    final wp = context.read<WaveProvider>();
+    EmisorState? prevState;
+    wp.addListener(() {
+      if (!mounted || _currentRole != UserRole.oyente) return;
+      final state = wp.emisorState;
+      if (prevState == EmisorState.reconnecting && state == EmisorState.connected && wp.currentWave != null) {
+        debugPrint('🔄 Emisor reconnected, restarting HLS for oyente');
+        _startHls(wp.currentWave!.id);
+      }
+      prevState = state;
     });
   }
 }

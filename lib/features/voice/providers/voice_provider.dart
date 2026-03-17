@@ -23,13 +23,17 @@ class VoiceProvider with ChangeNotifier {
   bool get micInvitePending => _micInvitePending;
   String? get micInviteFromUserId => _micInviteFromUserId;
 
+  bool _listenersRegistered = false;
+
   void initialize(String waveId, String userId, {required bool isOwner}) {
     _waveId = waveId;
     _userId = userId;
     _isOwner = isOwner;
-    _setupListeners();
+    if (!_listenersRegistered) {
+      _listenersRegistered = true;
+      _setupListeners();
+    }
 
-    // Request current mic state when joining
     _socket.emit('get-mic-state', {'waveId': waveId});
   }
 
