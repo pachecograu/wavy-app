@@ -14,20 +14,15 @@ class PlaybackSyncService {
     _waveId = waveId;
     _isDJ = true;
     _syncTimer?.cancel();
+    _syncTimer = Timer.periodic(const Duration(seconds: 5), (_) => _emitPosition());
+  }
 
-    // Periodically sync position so late-joining listeners catch up
-    _syncTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      _emitSync();
-    });
-
-    // Listen to DJ's player state changes
-    MusicService.audioPlayer.playerStateStream.listen((state) {
-      if (!_isDJ || _waveId == null) return;
-      _socket.emit('playback-sync', {
-        'waveId': _waveId,
-        'action': state.playing ? 'play' : 'pause',
-        'currentTime': MusicService.audioPlayer.position.inMilliseconds,
-      });
+  static void emitPlayPause() {
+    if (!_isDJ || _waveId == null) return;
+    _socket.emit('playback-sync', {
+      'waveId': _waveId,
+      'action': MusicService.audioPlayer.playing ? 'play' : 'pause',
+      'currentTime': MusicService.audioPlayer.position.inMilliseconds,
     });
   }
 
@@ -49,21 +44,27 @@ class PlaybackSyncService {
     _socket.on('sync-playback', (data) {
       try {
         final action = data['action']?.toString();
-        final currentTimeMs = (data['currentTime'] as num?)?.toInt() ?? 0;
-        final position = Duration(milliseconds: currentTimeMs);
-
-        debugPrint('🔄 Sync: $action at ${position.inSeconds}s');
+        final ms = (data['currentTime'] as num?)?.toInt() ?? 0;
 
         switch (action) {
           case 'play':
-            MusicService.audioPlayer.seek(position);
+            _seekIfNeeded(ms);
             MusicService.audioPlayer.play();
             break;
           case 'pause':
             MusicService.audioPlayer.pause();
             break;
           case 'seek':
-            MusicService.audioPlayer.seek(position);
+            MusicService.audioPlayer.seek(Duration(milliseconds: ms));
+            break;
+          case 'position':
+            if (!MusicService.audioPlayer.playing) {
+              // DJ is playing but we're paused — resume
+              _seekIfNeeded(ms);
+              MusicService.audioPlayer.play();
+            } else {
+              _seekIfNeeded(ms);
+            }
             break;
         }
       } catch (e) {
@@ -72,11 +73,18 @@ class PlaybackSyncService {
     });
   }
 
-  static void _emitSync() {
+  static void _seekIfNeeded(int targetMs) {
+    final currentMs = MusicService.audioPlayer.position.inMilliseconds;
+    if ((currentMs - targetMs).abs() > 2000) {
+      MusicService.audioPlayer.seek(Duration(milliseconds: targetMs));
+    }
+  }
+
+  static void _emitPosition() {
     if (!_isDJ || _waveId == null) return;
     _socket.emit('playback-sync', {
       'waveId': _waveId,
-      'action': MusicService.audioPlayer.playing ? 'play' : 'pause',
+      'action': MusicService.audioPlayer.playing ? 'position' : 'pause',
       'currentTime': MusicService.audioPlayer.position.inMilliseconds,
     });
   }

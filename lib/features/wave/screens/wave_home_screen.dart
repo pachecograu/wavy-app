@@ -3,16 +3,19 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_animate/flutter_animate.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/theme/wavy_theme.dart';
 import '../../../core/services/music_service.dart';
 import '../../../core/models/track.dart';
 import '../../../core/services/hybrid_audio_service.dart';
 import '../../../core/services/notification_service.dart';
+import '../../../core/socket/socket_service.dart';
+import '../../../core/services/mic_stream_service.dart';
 import '../../../core/services/playback_sync_service.dart';
 import '../providers/wave_provider.dart';
 import '../widgets/wave_list.dart';
 import '../widgets/wave_info_card.dart';
-import '../widgets/audio_stream_widget.dart';
 import '../widgets/particle_background.dart';
 import '../../auth/screens/role_selection_screen.dart';
 import '../../auth/providers/auth_provider.dart';
@@ -36,20 +39,24 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   bool _chatVisible = false;
   String? _selectedSong;
   bool _isPlaying = false;
+  bool _isLoading = false;
   bool _transmittingMic = false;
   bool _useCloudStorage = true;
+  List<Track> _localTracks = []; // ignore: prefer_final_fields
+  String _searchText = '';
   Duration _position = Duration.zero;
   // Chat notification (like AudiShare messageNotify)
-  String? _chatNotifyText;
   Timer? _chatNotifyTimer;
+  List<String> _floatingReactions = []; // ignore: prefer_final_fields
   StreamSubscription<Duration>? _posSub;
-  StreamSubscription<Duration?>? _durSub;
   StreamSubscription<PlayerState>? _stateSub;
   HybridAudioService? _hybrid;
   late AnimationController _rippleController;
   bool _chatNotifyListening = false;
   bool _reconnectListening = false;
   bool _appInForeground = true;
+  bool _reactionListening = false;
+  bool _locutorListening = false;
 
   @override
   void initState() {
@@ -65,12 +72,33 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   }
 
   void _setupAudio() {
-    _posSub = MusicService.audioPlayer.positionStream.listen((p) {
-      if (mounted) setState(() => _position = p);
+    // Position updates: throttle to 1/second for UI (progress bar only needs ~1fps)
+    _posSub = MusicService.audioPlayer.positionStream
+        .where((_) => mounted)
+        .listen((p) {
+      // Only rebuild if second changed (avoid 4x/sec rebuilds)
+      if (p.inSeconds != _position.inSeconds) {
+        setState(() => _position = p);
+      }
     });
-    _durSub = MusicService.audioPlayer.durationStream.listen((_) {});
     _stateSub = MusicService.audioPlayer.playerStateStream.listen((s) {
-      if (mounted) setState(() => _isPlaying = s.playing);
+      if (!mounted) return;
+      final playing = s.playing;
+      final loading = s.processingState == ProcessingState.loading ||
+                      s.processingState == ProcessingState.buffering;
+      if (playing != _isPlaying || loading != _isLoading) {
+        setState(() {
+          _isPlaying = playing;
+          _isLoading = loading;
+        });
+      }
+      // Auto-next: when track completes, play next (DJ only)
+      if (s.processingState == ProcessingState.completed &&
+          _currentRole == UserRole.emisor) {
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) _skipTrack(1);
+        });
+      }
     });
 
     // Wire notification skip buttons
@@ -98,7 +126,6 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     _rippleController.dispose();
     _chatNotifyTimer?.cancel();
     _posSub?.cancel();
-    _durSub?.cancel();
     _stateSub?.cancel();
     super.dispose();
   }
@@ -119,10 +146,12 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   void _startTransmitting() async {
     final wp = context.read<WaveProvider>();
     final auth = context.read<AuthProvider>();
+    final prefs = await SharedPreferences.getInstance();
+    final waveName = prefs.getString('wavy_wave_name') ?? 'Mi Wave';
+    final djName = prefs.getString('wavy_dj_name') ?? 'DJ ${auth.displayName ?? 'Anon'}';
     debugPrint('🚀 _startTransmitting called, socket connected: ${wp.toString()}');
-    // Register listener BEFORE creating wave to avoid race condition
     wp.addListener(_onWaveCreated);
-    wp.createWave('Mi Wave', 'DJ ${auth.displayName ?? 'Anon'}');
+    wp.createWave(waveName, djName);
     _hybrid = HybridAudioService();
     try {
       await _hybrid!.joinRoom('test-wave', 'emisor-${DateTime.now().millisecondsSinceEpoch}', isHost: true);
@@ -137,10 +166,12 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       final userId = context.read<AuthProvider>().userId!;
       debugPrint('✅ Wave created: $waveId, initializing chat/track/voice');
       context.read<ChatProvider>().initialize(waveId, userId);
-      context.read<TrackProvider>().initialize(waveId);
+      context.read<TrackProvider>().initialize(waveId, isOwner: true);
       context.read<VoiceProvider>().initialize(waveId, userId, isOwner: true);
       PlaybackSyncService.startAsDJ(waveId);
       _listenChatNotifications();
+      _listenReactions();
+      _listenLocutorVolume();
     }
   }
 
@@ -155,11 +186,6 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       final last = msgs.last;
       final userId = context.read<AuthProvider>().userId;
       if (last.userId == userId) return; // Don't notify own messages
-      setState(() => _chatNotifyText = last.message);
-      _chatNotifyTimer?.cancel();
-      _chatNotifyTimer = Timer(const Duration(milliseconds: 2500), () {
-        if (mounted) setState(() => _chatNotifyText = null);
-      });
       if (!_appInForeground) {
         NotificationService.showChatNotification(last.message);
       }
@@ -253,6 +279,8 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     }
     await MusicService.stopMusic();
     PlaybackSyncService.stop();
+    MicStreamService.stopBroadcasting();
+    MicStreamService.stopListening();
     if (_currentRole == UserRole.emisor && wp.currentWave != null) {
       if (wp.isStreaming) await wp.stopStreaming();
       await wp.stopWave();
@@ -269,13 +297,14 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Consumer<WaveProvider>(
-        builder: (context, wp, _) {
-          return Stack(
-            children: [
-              // Background
-              Container(color: WavyTheme.darkBackground),
-              const ParticleBackground(),
+      body: Stack(
+        children: [
+          Container(color: WavyTheme.darkBackground),
+          const RepaintBoundary(child: ParticleBackground()),
+          Consumer<WaveProvider>(
+            builder: (context, wp, _) {
+              return Stack(
+                children: [
               // Main layout (header + content + footer)
               SafeArea(
                 child: Column(
@@ -286,16 +315,40 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
                   ],
                 ),
               ),
+              // Floating reactions overlay
+              if (_floatingReactions.isNotEmpty)
+                Positioned(
+                  bottom: 100,
+                  left: 0,
+                  right: 0,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: _floatingReactions.map((e) => TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0.0, end: 1.0),
+                      duration: const Duration(milliseconds: 600),
+                      builder: (_, v, child) => Opacity(
+                        opacity: 1.0 - v * 0.5,
+                        child: Transform.translate(
+                          offset: Offset(0, -v * 60),
+                          child: child,
+                        ),
+                      ),
+                      child: Text(e, style: const TextStyle(fontSize: 32)),
+                    )).toList(),
+                  ),
+                ),
               // Mic FAB + ripple (emisor only, like AudiShare)
               if (_currentRole == UserRole.emisor && wp.currentWave != null)
                 _buildMicFab(),
               // Sidebar overlay (waves for oyente, playlist for emisor)
-              if (_sidebarVisible) _buildSidebar(wp),
+              _buildSidebar(wp),
               // Chat overlay
-              if (_chatVisible && wp.currentWave != null) _buildChat(wp),
+              if (wp.currentWave != null) _buildChat(wp),
             ],
           );
-        },
+            },
+          ),
+        ],
       ),
     );
   }
@@ -350,8 +403,44 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   // ─── CONTENT ───
   Widget _buildContent(WaveProvider wp) {
     if (wp.currentWave != null) return _buildInWave(wp);
+    if (!SocketService().isConnected) return _buildErrorScreen();
     if (_currentRole == UserRole.emisor) return _buildEmisorGreet(wp);
     return _buildOyenteGreet(wp);
+  }
+
+  Widget _buildErrorScreen() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.power_off, size: 80, color: WavyTheme.textSecondary)
+                .animate().fadeIn(duration: 400.ms).scale(begin: const Offset(1.4, 1.4)),
+            const SizedBox(height: 16),
+            const Text('Oops, hubo un problema!',
+                    style: TextStyle(color: WavyTheme.textPrimary, fontSize: 22, fontWeight: FontWeight.w700))
+                .animate().fadeIn(delay: 200.ms),
+            const SizedBox(height: 12),
+            const Text('No se pudo conectar al servidor. Verifica tu conexión a internet.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: WavyTheme.textSecondary, fontSize: 14))
+                .animate().fadeIn(delay: 400.ms),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () {
+                final auth = context.read<AuthProvider>();
+                SocketService().connect(auth.userId!);
+                context.read<WaveProvider>().initialize(auth.userId!);
+                setState(() {});
+              },
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('Reintentar'),
+            ).animate().slideY(begin: 1, delay: 600.ms).fadeIn(),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildOyenteGreet(WaveProvider wp) {
@@ -362,18 +451,19 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           const Text('Escucha las canciones de otros',
-              style: TextStyle(color: WavyTheme.textPrimary, fontSize: 26, fontWeight: FontWeight.w700)),
+                  style: TextStyle(color: WavyTheme.textPrimary, fontSize: 26, fontWeight: FontWeight.w700))
+              .animate().slideX(begin: 1, duration: 400.ms).fadeIn(),
           const SizedBox(height: 12),
           const Text(
             'Este es un streaming en vivo, aquí puedes escuchar las canciones de otras personas en tiempo real.',
             style: TextStyle(color: WavyTheme.textSecondary, fontSize: 14),
-          ),
+          ).animate().slideX(begin: 1, delay: 150.ms, duration: 400.ms).fadeIn(),
           const SizedBox(height: 24),
           ElevatedButton.icon(
             onPressed: () => setState(() => _sidebarVisible = true),
             icon: const Icon(Icons.headphones, size: 16),
             label: const Text('Ver waves'),
-          ),
+          ).animate().slideY(begin: 1, delay: 300.ms, duration: 400.ms).fadeIn(),
         ],
       ),
     );
@@ -387,12 +477,13 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           const Text('Haz que tus canciones las escuchen otros',
-              style: TextStyle(color: WavyTheme.textPrimary, fontSize: 26, fontWeight: FontWeight.w700)),
+                  style: TextStyle(color: WavyTheme.textPrimary, fontSize: 26, fontWeight: FontWeight.w700))
+              .animate().slideX(begin: 1, duration: 400.ms).fadeIn(),
           const SizedBox(height: 12),
           const Text(
             'Este es un streaming en vivo, aquí puedes sonar tus canciones para que otras personas las escuchen en tiempo real.',
             style: TextStyle(color: WavyTheme.textSecondary, fontSize: 14),
-          ),
+          ).animate().slideX(begin: 1, delay: 150.ms, duration: 400.ms).fadeIn(),
           const SizedBox(height: 24),
           Wrap(
             spacing: 8,
@@ -401,12 +492,12 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
                 onPressed: () => setState(() => _sidebarVisible = true),
                 icon: const Icon(Icons.headphones, size: 16),
                 label: const Text('Abrir lista de canciones'),
-              ),
+              ).animate().slideY(begin: 1, delay: 300.ms, duration: 400.ms).fadeIn(),
               ElevatedButton.icon(
                 onPressed: () => _startTransmitting(),
                 icon: const Icon(Icons.public, size: 16),
                 label: const Text('Transmitir'),
-              ),
+              ).animate().slideY(begin: 1, delay: 450.ms, duration: 400.ms).fadeIn(),
             ],
           ),
         ],
@@ -424,9 +515,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
           WaveInfoCard(wave: wp.currentWave!),
           const SizedBox(height: 16),
           if (_currentRole == UserRole.oyente) ...[
-            const AudioStreamWidget(),
             const SizedBox(height: 16),
-            // Recent tracks
             _buildRecentTracks(),
           ],
           if (_currentRole == UserRole.emisor) ...[
@@ -437,6 +526,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
           ],
           // Chat preview bar
           if (wp.currentWave != null) _buildChatPreview(),
+          if (wp.currentWave != null && _currentRole == UserRole.oyente) _buildReactionBar(wp),
         ],
       ),
     );
@@ -490,18 +580,26 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
             children: [
               const Text('Canciones recientes', style: TextStyle(color: WavyTheme.textPrimary, fontSize: 16, fontWeight: FontWeight.w700)),
               const SizedBox(height: 8),
-              ...tp.playedTracks.take(10).map((t) => Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(color: WavyTheme.itemBgEven, borderRadius: BorderRadius.circular(6)),
-                    child: Row(
-                      children: [
-                        Icon(t.isCurrent ? Icons.stop : Icons.play_arrow, color: WavyTheme.cornflowerBlue, size: 16),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(t.title, style: const TextStyle(color: WavyTheme.cornflowerBlue, fontSize: 13), overflow: TextOverflow.ellipsis),
-                        ),
-                      ],
+              ...tp.playedTracks.take(10).map((t) => GestureDetector(
+                    onTap: () {
+                      if (_currentRole == UserRole.emisor && t.url != null) {
+                        context.read<TrackProvider>().updateCurrentTrack(t.title, t.artist, url: t.url);
+                        MusicService.playTrack(t);
+                      }
+                    },
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: WavyTheme.itemBgEven, borderRadius: BorderRadius.circular(6)),
+                      child: Row(
+                        children: [
+                          Icon(t.isCurrent ? Icons.stop : Icons.play_arrow, color: WavyTheme.cornflowerBlue, size: 16),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(t.title, style: const TextStyle(color: WavyTheme.cornflowerBlue, fontSize: 13), overflow: TextOverflow.ellipsis),
+                          ),
+                        ],
+                      ),
                     ),
                   )),
             ],
@@ -512,76 +610,145 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   }
 
   Widget _buildChatPreview() {
-    return GestureDetector(
-      onTap: () => setState(() => _chatVisible = true),
-      child: Container(
-        margin: const EdgeInsets.all(16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            // Chat icon + badge
-            Stack(
+    return Consumer<ChatProvider>(
+      builder: (_, chat, __) {
+        final messages = chat.publicMessages;
+        final lastMessages = messages.length > 3
+            ? messages.sublist(messages.length - 3)
+            : messages;
+
+        return GestureDetector(
+          onTap: () => setState(() => _chatVisible = true),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: WavyTheme.cardBackground.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.send, color: WavyTheme.textPrimary, size: 22),
-                Positioned(
-                  bottom: 0,
-                  left: 0,
-                  child: Consumer<ChatProvider>(
-                    builder: (_, chat, __) => Container(
-                      padding: const EdgeInsets.all(3),
-                      decoration: const BoxDecoration(color: WavyTheme.accentRed, shape: BoxShape.circle),
-                      child: Text('${chat.publicMessages.length}', style: const TextStyle(color: Colors.white, fontSize: 9)),
+                // Messages with fade overlay
+                ClipRRect(
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                  child: ShaderMask(
+                    shaderCallback: (bounds) => const LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.transparent, Colors.white, Colors.white],
+                      stops: [0.0, 0.4, 1.0],
+                    ).createShader(bounds),
+                    blendMode: BlendMode.dstIn,
+                    child: Container(
+                      constraints: const BoxConstraints(maxHeight: 120),
+                      padding: const EdgeInsets.fromLTRB(12, 16, 12, 4),
+                      child: lastMessages.isEmpty
+                          ? const Center(
+                              child: Padding(
+                                padding: EdgeInsets.all(12),
+                                child: Text('No hay mensajes aún',
+                                    style: TextStyle(color: WavyTheme.textSecondary, fontSize: 12)),
+                              ),
+                            )
+                          : Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: lastMessages.map((msg) {
+                                final isSelf = msg.userId == context.read<AuthProvider>().userId;
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 6),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Container(
+                                        width: 22,
+                                        height: 22,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: isSelf ? WavyTheme.accentRed : const Color(0xE6FFFFFF),
+                                        ),
+                                        child: Icon(Icons.person, size: 14,
+                                            color: isSelf ? Colors.white : WavyTheme.textSecondary),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          msg.message,
+                                          style: TextStyle(
+                                            color: isSelf ? WavyTheme.textPrimary : WavyTheme.textSecondary,
+                                            fontSize: 12,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }).toList(),
+                            ),
                     ),
+                  ),
+                ),
+                // "Ir al chat" button
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  decoration: const BoxDecoration(
+                    border: Border(top: BorderSide(color: WavyTheme.borderColor)),
+                    borderRadius: BorderRadius.vertical(bottom: Radius.circular(12)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.chat_bubble_outline, size: 14, color: WavyTheme.cornflowerBlue),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Ir al chat · ${messages.length}',
+                        style: const TextStyle(color: WavyTheme.cornflowerBlue, fontSize: 12, fontWeight: FontWeight.w700),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
-            const SizedBox(width: 12),
-            // Floating message notification (like AudiShare messageNotify)
-            if (_chatNotifyText != null)
-              Expanded(
-                child: AnimatedOpacity(
-                  opacity: _chatNotifyText != null ? 1.0 : 0.0,
-                  duration: const Duration(milliseconds: 300),
-                  child: GestureDetector(
-                    onTap: () => setState(() => _chatVisible = true),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(2),
-                          topRight: Radius.circular(22),
-                          bottomLeft: Radius.circular(2),
-                          bottomRight: Radius.circular(22),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 24,
-                            height: 24,
-                            decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xE6FFFFFF)),
-                            child: const ClipOval(child: Icon(Icons.person, size: 16, color: WavyTheme.textSecondary)),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _chatNotifyText!,
-                              style: const TextStyle(color: Color(0xFF777777), fontSize: 13),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              )
-            else
-              const Text('Chat', style: TextStyle(color: WavyTheme.textSecondary, fontSize: 13)),
-          ],
-        ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ─── REACTIONS ───
+  Widget _buildReactionBar(WaveProvider wp) {
+    const reactions = ['⭐', '❤️', '🔥', '👏', '😂'];
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        children: reactions.map((emoji) {
+          return GestureDetector(
+            onTap: () {
+              final auth = context.read<AuthProvider>();
+              SocketService().emit('send-reaction', {
+                'waveId': wp.currentWave!.id,
+                'userId': auth.userId,
+                'reaction': emoji,
+              });
+              setState(() => _floatingReactions = [..._floatingReactions, emoji]);
+              Future.delayed(const Duration(seconds: 2), () {
+                if (mounted) {
+                  setState(() {
+                    _floatingReactions = _floatingReactions.length > 1
+                        ? _floatingReactions.sublist(1)
+                        : [];
+                  });
+                }
+              });
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Text(emoji, style: const TextStyle(fontSize: 22)),
+            ),
+          );
+        }).toList(),
       ),
     );
   }
@@ -612,9 +779,15 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
               },
             ),
           GestureDetector(
-            onTap: () {
+            onTap: () async {
+              final wp = context.read<WaveProvider>();
               setState(() => _transmittingMic = !_transmittingMic);
               context.read<VoiceProvider>().toggleLocutor();
+              if (_transmittingMic && wp.currentWave != null) {
+                await MicStreamService.startBroadcasting(wp.currentWave!.id);
+              } else {
+                await MicStreamService.stopBroadcasting();
+              }
             },
             child: Container(
               width: 60,
@@ -659,66 +832,93 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Progress bar (like AudiShare #progressbar)
-        GestureDetector(
-          onTapDown: (details) {
-            if (duration.inMilliseconds > 0) {
-              final box = context.findRenderObject() as RenderBox;
-              final ratio = details.localPosition.dx / box.size.width;
-              final seekTo = Duration(milliseconds: (duration.inMilliseconds * ratio).toInt());
-              MusicService.audioPlayer.seek(seekTo);
-              PlaybackSyncService.emitSeek();
-            }
-          },
-          child: Container(
-            height: 3,
-            width: double.infinity,
-            color: const Color(0xFF757575),
-            alignment: Alignment.centerLeft,
-            child: FractionallySizedBox(
-              widthFactor: progress,
-              child: Container(height: 3, color: WavyTheme.primaryRed),
-            ),
+        // Time labels + progress bar
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Text(_fmt(_position), style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 10)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: GestureDetector(
+                  onTapDown: (details) {
+                    if (duration.inMilliseconds > 0) {
+                      final box = context.findRenderObject() as RenderBox;
+                      final ratio = details.localPosition.dx / box.size.width;
+                      final seekTo = Duration(milliseconds: (duration.inMilliseconds * ratio).toInt());
+                      MusicService.audioPlayer.seek(seekTo);
+                      PlaybackSyncService.emitSeek();
+                    }
+                  },
+                  child: Container(
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF32334F),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                    alignment: Alignment.centerLeft,
+                    child: FractionallySizedBox(
+                      widthFactor: progress,
+                      child: Container(
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: WavyTheme.primaryRed,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(_fmt(duration), style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 10)),
+            ],
           ),
         ),
-        // Controls
+        const SizedBox(height: 4),
+        // Controls row
         Container(
-          height: 56,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
+          height: 52,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
           color: WavyTheme.headerBg,
           child: Row(
             children: [
+              // Transport controls
               IconButton(
                 onPressed: () => _skipTrack(-1),
-                icon: const Icon(Icons.skip_previous, color: WavyTheme.textPrimary, size: 22),
+                icon: const Icon(Icons.skip_previous_rounded, color: WavyTheme.textPrimary, size: 28),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
               ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: IconButton(
-                  onPressed: () async {
-                    if (_isPlaying) {
-                      await MusicService.pauseMusic();
-                    } else {
-                      await MusicService.resumeMusic();
-                    }
-                  },
-                  icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow, color: WavyTheme.textPrimary, size: 28),
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                ),
-              ),
+              const SizedBox(width: 16),
+              _isLoading
+                  ? const SizedBox(width: 36, height: 36, child: CircularProgressIndicator(strokeWidth: 3, color: WavyTheme.primaryRed))
+                  : IconButton(
+                      onPressed: () async {
+                        if (_isPlaying) {
+                          await MusicService.pauseMusic();
+                        } else {
+                          await MusicService.resumeMusic();
+                        }
+                        PlaybackSyncService.emitPlayPause();
+                      },
+                      icon: Icon(_isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                          color: WavyTheme.textPrimary, size: 36),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+              const SizedBox(width: 16),
               IconButton(
                 onPressed: () => _skipTrack(1),
-                icon: const Icon(Icons.skip_next, color: WavyTheme.textPrimary, size: 22),
+                icon: const Icon(Icons.skip_next_rounded, color: WavyTheme.textPrimary, size: 28),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
               ),
-              const SizedBox(width: 12),
-              const Icon(Icons.volume_down, color: WavyTheme.textSecondary, size: 16),
+              const Spacer(),
+              // Volume
+              const Icon(Icons.volume_down_rounded, color: WavyTheme.textSecondary, size: 18),
               SizedBox(
-                width: 80,
+                width: 90,
                 child: SliderTheme(
                   data: SliderTheme.of(context).copyWith(
                     activeTrackColor: WavyTheme.textPrimary,
@@ -726,6 +926,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
                     thumbColor: WavyTheme.textPrimary,
                     thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
                     trackHeight: 3,
+                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
                   ),
                   child: Slider(
                     value: MusicService.audioPlayer.volume,
@@ -733,9 +934,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
                   ),
                 ),
               ),
-              const Icon(Icons.volume_up, color: WavyTheme.textSecondary, size: 16),
-              const SizedBox(width: 8),
-              Text(_fmt(_position), style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 12)),
+              const Icon(Icons.volume_up_rounded, color: WavyTheme.textSecondary, size: 18),
             ],
           ),
         ),
@@ -745,16 +944,24 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
 
   Widget _buildOyenteFooter(WaveProvider wp) {
     return Container(
-      height: 60,
+      height: 64,
       padding: const EdgeInsets.symmetric(horizontal: 16),
       color: WavyTheme.headerBg,
       child: Row(
         children: [
-          IconButton(
-            onPressed: () {},
-            icon: Icon(_isPlaying ? Icons.stop : Icons.play_arrow, color: WavyTheme.textPrimary, size: 24),
-          ),
-          const Icon(Icons.volume_down, color: WavyTheme.textSecondary, size: 16),
+          // Play/stop
+          _isLoading
+              ? const SizedBox(width: 32, height: 32, child: CircularProgressIndicator(strokeWidth: 3, color: WavyTheme.primaryRed))
+              : IconButton(
+                  onPressed: () {},
+                  icon: Icon(_isPlaying ? Icons.stop_circle_rounded : Icons.play_circle_filled,
+                      color: WavyTheme.textPrimary, size: 32),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+          const SizedBox(width: 12),
+          // Volume
+          const Icon(Icons.volume_down_rounded, color: WavyTheme.textSecondary, size: 18),
           SizedBox(
             width: 80,
             child: SliderTheme(
@@ -764,52 +971,24 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
                 thumbColor: WavyTheme.textPrimary,
                 thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
                 trackHeight: 3,
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
               ),
-              child: Slider(value: 0.5, onChanged: (v) {}),
-            ),
-          ),
-          const Icon(Icons.volume_up, color: WavyTheme.textSecondary, size: 16),
-          const SizedBox(width: 8),
-          Text(_fmt(_position), style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 12)),
-          if (wp.currentWave != null) ...[
-            const Text(' | ', style: TextStyle(color: WavyTheme.textSecondary, fontSize: 12)),
-            Expanded(
-              child: Text(
-                wp.currentWave!.name,
-                style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 12),
-                overflow: TextOverflow.ellipsis,
+              child: Slider(
+                value: MusicService.audioPlayer.volume,
+                onChanged: (v) => MusicService.audioPlayer.setVolume(v),
               ),
             ),
-          ],
-          // Bitrate monitor
-          Consumer<QualityProvider>(
-            builder: (_, qp, __) {
-              final label = qp.localBitrate > 0
-                  ? '${qp.localBitrate} kbits/s'
-                  : 'Conectando';
-              return Text(
-                label,
-                style: TextStyle(
-                  color: qp.localBufferHealth == 'poor'
-                      ? Colors.red
-                      : qp.localBufferHealth == 'fair'
-                          ? Colors.orange
-                          : WavyTheme.textSecondary,
-                  fontSize: 10,
-                ),
-              );
-            },
           ),
-          const SizedBox(width: 4),
-          TextButton(
-            onPressed: () {
-              wp.leaveWave();
-              context.read<TrackProvider>().clearTracks();
-              context.read<QualityProvider>().clear();
-              PlaybackSyncService.stop();
-              MusicService.stopMusic();
-            },
-            child: const Text('Salir', style: TextStyle(color: WavyTheme.primaryRed, fontSize: 12)),
+          const Icon(Icons.volume_up_rounded, color: WavyTheme.textSecondary, size: 18),
+          const Spacer(),
+          // Live time (time since DJ started)
+          const Icon(Icons.circle, color: WavyTheme.primaryRed, size: 8),
+          const SizedBox(width: 6),
+          Text(
+            _fmt(wp.currentWave != null
+                ? DateTime.now().difference(wp.currentWave!.createdAt)
+                : Duration.zero),
+            style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 12),
           ),
         ],
       ),
@@ -818,26 +997,37 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
 
   // ─── SIDEBAR ───
   Widget _buildSidebar(WaveProvider wp) {
+    final width = MediaQuery.of(context).size.width * 0.85;
     return Stack(
       children: [
         // Backdrop
-        GestureDetector(
-          onTap: () => setState(() => _sidebarVisible = false),
-          child: Container(color: Colors.black.withValues(alpha: 0.4)),
-        ),
-        // Panel from right
-        Positioned(
+        if (_sidebarVisible)
+          GestureDetector(
+            onTap: () => setState(() => _sidebarVisible = false),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              color: _sidebarVisible ? Colors.black.withValues(alpha: 0.4) : Colors.transparent,
+            ),
+          ),
+        // Panel slides from right
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOutCubic,
           top: 0,
-          right: 0,
           bottom: 0,
-          child: SizedBox(
-            width: MediaQuery.of(context).size.width * 0.85,
+          right: _sidebarVisible ? 0 : -width,
+          width: width,
+          child: Material(
+            elevation: _sidebarVisible ? 20 : 0,
+            shadowColor: Colors.black,
+            color: Colors.transparent,
             child: _currentRole == UserRole.emisor
                 ? _buildPlaylistSidebar(wp)
                 : WaveList(
                     waves: wp.onlineWaves,
                     activeWaveId: wp.currentWave?.id,
                     onClose: () => setState(() => _sidebarVisible = false),
+                    onRefresh: () => wp.refreshWaves(),
                     onWaveTap: (wave) {
                       wp.joinWave(wave.id);
                       _startHls(wave.id);
@@ -865,15 +1055,16 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
               children: [
                 const Icon(Icons.search, color: WavyTheme.textPrimary, size: 18),
                 const SizedBox(width: 8),
-                const Expanded(
+                Expanded(
                   child: TextField(
-                    style: TextStyle(color: WavyTheme.textPrimary, fontSize: 14),
-                    decoration: InputDecoration(
+                    style: const TextStyle(color: WavyTheme.textPrimary, fontSize: 14),
+                    decoration: const InputDecoration(
                       hintText: 'Buscar canción...',
                       hintStyle: TextStyle(color: WavyTheme.textSecondary),
                       border: InputBorder.none,
                       isDense: true,
                     ),
+                    onChanged: (v) => setState(() => _searchText = v),
                   ),
                 ),
                 IconButton(
@@ -965,43 +1156,69 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   }
 
   Widget _buildLocalSongList() {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.folder_open, size: 60, color: WavyTheme.textSecondary),
-          const SizedBox(height: 8),
-          const Text('Selecciona archivos locales', style: TextStyle(color: WavyTheme.textSecondary)),
-          const SizedBox(height: 12),
-          ElevatedButton.icon(
-            onPressed: () async {
-              final tp = context.read<TrackProvider>();
-              final result = await FilePicker.platform.pickFiles(
-                type: FileType.audio,
-                allowMultiple: false,
-              );
-              if (result != null && result.files.isNotEmpty) {
-                final file = result.files.first;
-                final track = Track(
-                  title: file.name.replaceAll(RegExp(r'\.[^.]+$'), ''),
-                  artist: 'Local',
-                  url: file.path,
-                  isCurrent: false,
-                  playedAt: DateTime.now(),
-                );
-                tp.updateCurrentTrack(track.title, track.artist, url: track.url);
-                await MusicService.playTrack(track);
-              }
-            },
-            icon: const Icon(Icons.audio_file, size: 16),
-            label: const Text('Elegir archivo'),
+    if (_localTracks.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.folder_open, size: 60, color: WavyTheme.textSecondary),
+            const SizedBox(height: 8),
+            const Text('Selecciona archivos de audio', style: TextStyle(color: WavyTheme.textSecondary)),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: _pickLocalFiles,
+              icon: const Icon(Icons.audio_file, size: 16),
+              label: const Text('Elegir archivos'),
+            ),
+          ],
+        ),
+      );
+    }
+    return Column(
+      children: [
+        Expanded(child: _buildTrackListView(_localTracks)),
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: ElevatedButton.icon(
+            onPressed: _pickLocalFiles,
+            icon: const Icon(Icons.add, size: 16),
+            label: Text('${_localTracks.length} archivos · Agregar más'),
+            style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 36)),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
-  Widget _buildTrackListView(List<Track> tracks) {
+  void _pickLocalFiles() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      allowMultiple: true,
+    );
+    if (result != null && result.files.isNotEmpty) {
+      final newTracks = result.files
+          .where((f) => f.path != null)
+          .map((f) => Track(
+                title: f.name.replaceAll(RegExp(r'\.[^.]+$'), ''),
+                artist: 'Local',
+                url: f.path,
+                isCurrent: false,
+                playedAt: DateTime.now(),
+              ))
+          .toList();
+      setState(() {
+        // Add without duplicates
+        for (final t in newTracks) {
+          if (!_localTracks.any((e) => e.url == t.url)) _localTracks.add(t);
+        }
+      });
+    }
+  }
+
+  Widget _buildTrackListView(List<Track> allTracks) {
+    final tracks = _searchText.isEmpty
+        ? allTracks
+        : allTracks.where((t) => t.title.toLowerCase().contains(_searchText.toLowerCase())).toList();
     return ListView.builder(
       itemCount: tracks.length,
       itemBuilder: (context, i) {
@@ -1024,13 +1241,14 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
                   margin: const EdgeInsets.only(right: 12),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    border: Border.all(color: WavyTheme.textPrimary),
+                    border: Border.all(color: playing ? WavyTheme.primaryRed : WavyTheme.textPrimary),
+                    gradient: const LinearGradient(colors: [Color(0xFF32334F), Color(0xFF4F527E)]),
                   ),
-                  child: Icon(
-                    playing ? Icons.stop : Icons.play_arrow,
-                    size: 16,
-                    color: WavyTheme.cornflowerBlue,
-                  ),
+                  child: playing
+                      ? const Icon(Icons.album, size: 20, color: WavyTheme.primaryRed)
+                          .animate(onPlay: (c) => c.repeat())
+                          .rotate(duration: 2000.ms)
+                      : const Icon(Icons.play_arrow, size: 16, color: WavyTheme.cornflowerBlue),
                 ),
                 Expanded(
                   child: Text(
@@ -1053,22 +1271,35 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
 
   // ─── CHAT ───
   Widget _buildChat(WaveProvider wp) {
+    final width = MediaQuery.of(context).size.width * 0.85;
     return Stack(
       children: [
-        GestureDetector(
-          onTap: () => setState(() => _chatVisible = false),
-          child: Container(color: Colors.black.withValues(alpha: 0.4)),
-        ),
-        Positioned(
-          top: 0,
-          right: 0,
-          bottom: 0,
-          child: SizedBox(
-            width: MediaQuery.of(context).size.width * 0.85,
-            child: ChatPanel(
-              waveId: wp.currentWave!.id,
-              onClose: () => setState(() => _chatVisible = false),
+        if (_chatVisible)
+          GestureDetector(
+            onTap: () => setState(() => _chatVisible = false),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              color: _chatVisible ? Colors.black.withValues(alpha: 0.4) : Colors.transparent,
             ),
+          ),
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOutCubic,
+          top: 0,
+          bottom: 0,
+          right: _chatVisible ? 0 : -width,
+          width: width,
+          child: Material(
+            elevation: _chatVisible ? 20 : 0,
+            shadowColor: Colors.black,
+            color: Colors.transparent,
+            child: wp.currentWave != null
+                ? ChatPanel(
+                    waveId: wp.currentWave!.id,
+                    djUserId: wp.currentWave!.ownerId,
+                    onClose: () => setState(() => _chatVisible = false),
+                  )
+                : const SizedBox.shrink(),
           ),
         ),
       ],
@@ -1091,8 +1322,40 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       context.read<VoiceProvider>().initialize(waveId, userId, isOwner: false);
       context.read<QualityProvider>().initialize(waveId, userId, isOwner: false);
       PlaybackSyncService.startAsListener(waveId);
+      MicStreamService.startListening(waveId);
       _listenChatNotifications();
       _listenEmisorReconnect();
+      _listenReactions();
+      _listenLocutorVolume();
+    });
+  }
+
+  void _listenLocutorVolume() {
+    if (_locutorListening || _currentRole != UserRole.oyente) return;
+    _locutorListening = true;
+    final vp = context.read<VoiceProvider>();
+    vp.addListener(() {
+      if (!mounted) return;
+      MusicService.audioPlayer.setVolume(vp.suggestedMusicVolume);
+    });
+  }
+
+  void _listenReactions() {
+    if (_reactionListening) return;
+    _reactionListening = true;
+    SocketService().on('reaction-received', (data) {
+      if (!mounted) return;
+      final emoji = data['reaction']?.toString() ?? '❤️';
+      setState(() => _floatingReactions = [..._floatingReactions, emoji]);
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) {
+          setState(() {
+            _floatingReactions = _floatingReactions.length > 1
+                ? _floatingReactions.sublist(1)
+                : [];
+          });
+        }
+      });
     });
   }
 
@@ -1101,13 +1364,30 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     _reconnectListening = true;
     final wp = context.read<WaveProvider>();
     EmisorState? prevState;
+    bool hadWave = false;
     wp.addListener(() {
       if (!mounted || _currentRole != UserRole.oyente) return;
       final state = wp.emisorState;
+      // DJ reconnected
       if (prevState == EmisorState.reconnecting && state == EmisorState.connected && wp.currentWave != null) {
-        debugPrint('🔄 Emisor reconnected, restarting HLS for oyente');
+        debugPrint('🔄 Emisor reconnected, restarting for oyente');
         _startHls(wp.currentWave!.id);
       }
+      // DJ went offline (wave-offline)
+      if (hadWave && wp.currentWave == null) {
+        MusicService.stopMusic();
+        PlaybackSyncService.stop();
+        MicStreamService.stopListening();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('El DJ ha terminado la transmisión'),
+              backgroundColor: WavyTheme.primaryRed,
+            ),
+          );
+        }
+      }
+      hadWave = wp.currentWave != null;
       prevState = state;
     });
   }

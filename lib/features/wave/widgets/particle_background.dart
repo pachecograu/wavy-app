@@ -60,13 +60,15 @@ class _ParticleBackgroundState extends State<ParticleBackground>
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, _) {
-        return CustomPaint(
-          size: Size.infinite,
-          painter: _SpherePainter(
-            rotation: _controller.value * 2 * pi,
-            bass: _bass,
-            colorFreq: _colorFreq,
-            isPlaying: _isPlaying,
+        return RepaintBoundary(
+          child: CustomPaint(
+            size: Size.infinite,
+            painter: _SpherePainter(
+              rotation: _controller.value * 2 * pi,
+              bass: _bass,
+              colorFreq: _colorFreq,
+              isPlaying: _isPlaying,
+            ),
           ),
         );
       },
@@ -78,8 +80,8 @@ class _ParticleBackgroundState extends State<ParticleBackground>
 List<_SphereVertex> _buildVertices() {
   final rng = Random(42);
   final verts = <_SphereVertex>[];
-  const wSeg = 30;
-  const hSeg = 14;
+  const wSeg = 20;
+  const hSeg = 10;
 
   for (int y = 0; y <= hSeg; y++) {
     for (int x = 0; x <= wSeg; x++) {

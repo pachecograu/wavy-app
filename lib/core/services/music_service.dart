@@ -139,10 +139,8 @@ class MusicService {
   }
 
   static Future<void> playTrack(Track track) async {
+    if (track.url == null) return;
     try {
-      if (track.url == null) return;
-      await _audioPlayer.setUrl(track.url!);
-      await _audioPlayer.play();
       _currentTrack = Track(
         title: track.title,
         artist: track.artist,
@@ -151,6 +149,8 @@ class MusicService {
         playedAt: DateTime.now(),
       );
       _handler?.updateNowPlaying(track.title, track.artist);
+      await _audioPlayer.setUrl(track.url!);
+      await _audioPlayer.play();
       debugPrint('Playing: ${track.title} from S3');
     } catch (e) {
       debugPrint('Error playing track: $e');

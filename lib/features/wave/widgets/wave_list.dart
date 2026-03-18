@@ -6,6 +6,7 @@ class WaveList extends StatefulWidget {
   final List<Wave> waves;
   final Function(Wave) onWaveTap;
   final VoidCallback? onClose;
+  final VoidCallback? onRefresh;
   final String? activeWaveId;
 
   const WaveList({
@@ -13,6 +14,7 @@ class WaveList extends StatefulWidget {
     required this.waves,
     required this.onWaveTap,
     this.onClose,
+    this.onRefresh,
     this.activeWaveId,
   });
 
@@ -28,18 +30,27 @@ class _WaveListState extends State<WaveList> {
     var list = widget.waves.where((w) {
       if (_search.isEmpty) return true;
       return w.name.toLowerCase().contains(_search.toLowerCase()) ||
-          w.djName.toLowerCase().contains(_search.toLowerCase());
+          w.djName.toLowerCase().contains(_search.toLowerCase()) ||
+          w.genre.toLowerCase().contains(_search.toLowerCase());
     }).toList();
 
     if (_sortBy == 'listeners') {
       list.sort((a, b) => b.listenersCount.compareTo(a.listenersCount));
+    } else if (_sortBy == 'genre') {
+      list.sort((a, b) => a.genre.toLowerCase().compareTo(b.genre.toLowerCase()));
     } else {
       list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     }
     return list;
   }
 
-  String get _sortLabel => _sortBy == 'listeners' ? 'Cantidad escuchando' : 'Nombre wave';
+  String get _sortLabel {
+    switch (_sortBy) {
+      case 'listeners': return 'Cantidad escuchando';
+      case 'genre': return 'Género musical';
+      default: return 'Nombre wave';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -74,6 +85,11 @@ class _WaveListState extends State<WaveList> {
                   IconButton(
                     onPressed: widget.onClose,
                     icon: const Icon(Icons.cancel, color: WavyTheme.textPrimary, size: 22),
+                  ),
+                if (widget.onRefresh != null)
+                  IconButton(
+                    onPressed: widget.onRefresh,
+                    icon: const Icon(Icons.refresh, color: WavyTheme.textPrimary, size: 22),
                   ),
               ],
             ),
@@ -120,7 +136,11 @@ class _WaveListState extends State<WaveList> {
                 GestureDetector(
                   onTap: () {
                     setState(() {
-                      _sortBy = _sortBy == 'listeners' ? 'name' : 'listeners';
+                      _sortBy = _sortBy == 'listeners'
+                          ? 'name'
+                          : _sortBy == 'name'
+                              ? 'genre'
+                              : 'listeners';
                     });
                   },
                   child: Text(_sortLabel, style: const TextStyle(color: WavyTheme.cornflowerBlue, fontSize: 13)),
@@ -195,9 +215,24 @@ class _WaveItem extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
+                    wave.genre.toUpperCase(),
+                    style: TextStyle(color: WavyTheme.textSecondary.withValues(alpha: 0.7), fontSize: 10, letterSpacing: 0.5),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
                     'DJ: ${wave.djName}',
                     style: const TextStyle(color: WavyTheme.textSecondary, fontSize: 12),
                   ),
+                  if (wave.description != 'Sin información') ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      wave.description,
+                      style: TextStyle(color: WavyTheme.textSecondary.withValues(alpha: 0.6), fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ],
               ),
             ),

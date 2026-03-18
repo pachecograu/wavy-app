@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/theme/wavy_theme.dart';
 import '../../../core/models/wave.dart';
 import '../providers/wave_provider.dart';
@@ -31,6 +32,11 @@ class _WaveInfoCardState extends State<WaveInfoCard> {
         // Save
         final value = _controllers[field]?.text ?? currentValue;
         context.read<WaveProvider>().updateField(field, value);
+        // Persist for next session
+        SharedPreferences.getInstance().then((prefs) {
+          if (field == 'name') prefs.setString('wavy_wave_name', value);
+          if (field == 'djName') prefs.setString('wavy_dj_name', value);
+        });
         _editing[field] = false;
       } else {
         // Start editing

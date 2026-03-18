@@ -47,7 +47,7 @@ class VisualizerService {
     if (_fallbackTimer != null) return;
     final rng = Random();
 
-    _fallbackTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+    _fallbackTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       final playing = MusicService.audioPlayer.playing;
       if (!playing) {
         _freqData = List.filled(32, 0);

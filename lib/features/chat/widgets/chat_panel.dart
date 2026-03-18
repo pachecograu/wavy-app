@@ -6,9 +6,10 @@ import '../../auth/providers/auth_provider.dart';
 
 class ChatPanel extends StatefulWidget {
   final String waveId;
+  final String? djUserId;
   final VoidCallback onClose;
 
-  const ChatPanel({super.key, required this.waveId, required this.onClose});
+  const ChatPanel({super.key, required this.waveId, this.djUserId, required this.onClose});
 
   @override
   State<ChatPanel> createState() => _ChatPanelState();
@@ -92,7 +93,8 @@ class _ChatPanelState extends State<ChatPanel> {
                   itemBuilder: (_, i) {
                     final msg = chat.publicMessages[i];
                     final isSelf = msg.userId == userId;
-                    return _ChatBubble(message: msg, isSelf: isSelf);
+                    final isDJ = msg.userId == widget.djUserId;
+                    return _ChatBubble(message: msg, isSelf: isSelf, isDJ: isDJ);
                   },
                 );
               },
@@ -144,8 +146,9 @@ class _ChatPanelState extends State<ChatPanel> {
 class _ChatBubble extends StatelessWidget {
   final Message message;
   final bool isSelf;
+  final bool isDJ;
 
-  const _ChatBubble({required this.message, required this.isSelf});
+  const _ChatBubble({required this.message, required this.isSelf, this.isDJ = false});
 
   @override
   Widget build(BuildContext context) {
@@ -172,6 +175,16 @@ class _ChatBubble extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (isDJ && !isSelf)
+                    const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.headphones, size: 10, color: WavyTheme.primaryRed),
+                        SizedBox(width: 4),
+                        Text('DJ', style: TextStyle(color: WavyTheme.primaryRed, fontSize: 10, fontWeight: FontWeight.bold)),
+                        SizedBox(height: 4),
+                      ],
+                    ),
                   Text(
                     message.message,
                     style: TextStyle(

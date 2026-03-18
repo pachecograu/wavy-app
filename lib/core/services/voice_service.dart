@@ -15,8 +15,19 @@ class VoiceService {
     try {
       debugPrint('🎙️ Connecting to voice room: $roomId');
 
-      _room = Room();
-      _room!.localParticipant?.setMicrophoneEnabled(false);
+      _room = Room(
+        roomOptions: const RoomOptions(
+          defaultAudioPublishOptions: AudioPublishOptions(
+            dtx: true,        // Discontinuous transmission (save bandwidth on silence)
+            audioBitrate: 24000, // 24kbps mono voice (AudiShare used ~50kbps)
+          ),
+          defaultAudioCaptureOptions: AudioCaptureOptions(
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          ),
+        ),
+      );
 
       await _room!.connect(
         AppConfig.liveKitUrl,

@@ -9,17 +9,19 @@ class TrackProvider with ChangeNotifier {
   Track? _currentTrack;
   List<Track> _playedTracks = [];
   String? _currentWaveId;
+  bool _isOwner = false;
   
   Track? get currentTrack => _currentTrack;
   List<Track> get playedTracks => _playedTracks;
   
   bool _listenersRegistered = false;
 
-  void initialize(String waveId) {
+  void initialize(String waveId, {bool isOwner = false}) {
     if (_currentWaveId == waveId) {
       return;
     }
     _currentWaveId = waveId;
+    _isOwner = isOwner;
     if (!_listenersRegistered) {
       _listenersRegistered = true;
       _setupSocketListeners();
@@ -51,8 +53,8 @@ class TrackProvider with ChangeNotifier {
           _playedTracks = List<Track>.from(_playedTracks)..insert(0, _currentTrack!);
         }
         
-        // Auto-play for listeners: if URL is present, play from S3
-        if (url != null && url.isNotEmpty) {
+        // Auto-play for listeners only (DJ plays directly)
+        if (!_isOwner && url != null && url.isNotEmpty) {
           MusicService.playTrack(_currentTrack!);
         }
         
@@ -83,7 +85,7 @@ class TrackProvider with ChangeNotifier {
           _playedTracks = tracks;
           
           // Auto-play current track for listeners joining mid-session
-          if (_currentTrack?.url != null && _currentTrack!.url!.isNotEmpty) {
+          if (!_isOwner && _currentTrack?.url != null && _currentTrack!.url!.isNotEmpty) {
             MusicService.playTrack(_currentTrack!);
           }
           
