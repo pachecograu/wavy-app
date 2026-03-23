@@ -199,6 +199,8 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   }
 
   Future<void> _exit(WaveProvider wp) async {
+    final voiceProvider = context.read<VoiceProvider>();
+
     if (_currentRole == UserRole.emisor && wp.currentWave != null) {
       final confirmed = await showDialog<bool>(
         context: context,
@@ -285,6 +287,20 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     }
     await MusicService.stopMusic();
     PlaybackSyncService.stop();
+
+    if (_currentRole == UserRole.emisor && _transmittingMic) {
+      try {
+        await _hybrid?.setMicrophoneEnabled(false);
+      } catch (_) {}
+
+      if (voiceProvider.locutorActive) {
+        voiceProvider.toggleLocutor();
+      }
+      if (mounted) {
+        setState(() => _transmittingMic = false);
+      }
+    }
+
     await _hybrid?.leaveRoom();
     if (_currentRole == UserRole.emisor && wp.currentWave != null) {
       if (wp.isStreaming) await wp.stopStreaming();
@@ -786,15 +802,20 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
           GestureDetector(
             onTap: () async {
               if (_hybrid == null) return;
-              final enabling = !_transmittingMic;
-              setState(() => _transmittingMic = enabling);
+              if (_transmittingMic) {
+                // Keep DJ mic active; it will be released only when leaving DJ role.
+                return;
+              }
+
+              const enabling = true;
+              setState(() => _transmittingMic = true);
               context.read<VoiceProvider>().toggleLocutor();
               try {
                 await _hybrid!.setMicrophoneEnabled(enabling);
               } catch (e) {
-                debugPrint('❌ Error toggling LiveKit mic: $e');
+                debugPrint('❌ Error enabling WebRTC mic: $e');
                 if (!mounted) return;
-                setState(() => _transmittingMic = !enabling);
+                setState(() => _transmittingMic = false);
               }
             },
             child: Container(

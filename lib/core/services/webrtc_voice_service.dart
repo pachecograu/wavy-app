@@ -35,6 +35,7 @@ class WebRTCVoiceService {
   String? _roomId;
   String? _userId;
   bool _isHost = false;
+  bool _isPreparingLocalStream = false;
 
   /// hostUserId as reported by the backend in hybrid_room_joined / mic_started
   String? _hostUserId;
@@ -70,10 +71,20 @@ class WebRTCVoiceService {
 
     _registerSignalingHandlers();
 
+    if (_isHost) {
+      // Prewarm capture pipeline so first mic enable is instant.
+      await _prepareLocalStream(prewarmMuted: true);
+    }
+
     // Listener joins a wave where mic is already active
-    if (!isHost && micActive && hostUserId != null) {
-      debugPrint('🎙️ Mic already active on join – requesting WebRTC offer from $hostUserId');
+    if (!isHost && hostUserId != null) {
+      // Eager preconnect: request offer immediately on join.
+      // If DJ mic is muted, session remains established and unmute is instant.
+      debugPrint('🎙️ Listener preconnect – requesting offer from $hostUserId');
       _requestOffer(hostUserId);
+      if (micActive) {
+        debugPrint('🎙️ Mic already active on join');
+      }
     }
 
     debugPrint('🎙️ WebRTCVoiceService initialized – room=$roomId host=$isHost');
@@ -111,15 +122,7 @@ class WebRTCVoiceService {
   Future<void> enableMicrophone() async {
     if (_micEnabled) return;
     try {
-      _localStream ??= await navigator.mediaDevices.getUserMedia({
-        'audio': {
-          'echoCancellation': true,
-          'noiseSuppression': true,
-          'autoGainControl': true,
-          'sampleRate': 48000,
-        },
-        'video': false,
-      });
+      await _prepareLocalStream(prewarmMuted: false);
 
       for (final t in _localStream!.getAudioTracks()) {
         t.enabled = true;
@@ -297,24 +300,27 @@ class WebRTCVoiceService {
         return;
       }
 
+      if (_isHost && _localStream == null) {
+        await _prepareLocalStream(prewarmMuted: true);
+      }
+
       _closePc(listenerId);
       final pc = await _buildPc(listenerId);
 
       if (_localStream != null) {
         for (final t in _localStream!.getAudioTracks()) {
-          await pc.addTrack(t, _localStream!);
+          final sender = await pc.addTrack(t, _localStream!);
+          await _optimizeSender(sender);
         }
       }
 
-      final offer = await pc.createOffer({
-        'offerToReceiveAudio': 0,
-        'offerToReceiveVideo': 0,
-      });
+      final offer = await pc.createOffer({});
+      final optimizedOfferSdp = _optimizeAudioSdp(offer.sdp);
       await pc.setLocalDescription(offer);
 
       _socket.emit('webrtc_offer', {
         'targetUserId': listenerId,
-        'sdp': {'sdp': offer.sdp, 'type': offer.type},
+        'sdp': {'sdp': optimizedOfferSdp, 'type': offer.type},
       });
       debugPrint('🎙️ Offer sent to $listenerId');
     } catch (e) {
@@ -330,15 +336,13 @@ class WebRTCVoiceService {
         RTCSessionDescription(sdpMap['sdp'], sdpMap['type']),
       );
 
-      final answer = await pc.createAnswer({
-        'offerToReceiveAudio': 1,
-        'offerToReceiveVideo': 0,
-      });
+      final answer = await pc.createAnswer({});
+      final optimizedAnswerSdp = _optimizeAudioSdp(answer.sdp);
       await pc.setLocalDescription(answer);
 
       _socket.emit('webrtc_answer', {
         'targetUserId': peerId,
-        'sdp': {'sdp': answer.sdp, 'type': answer.type},
+        'sdp': {'sdp': optimizedAnswerSdp, 'type': answer.type},
       });
       debugPrint('🎙️ Answer sent to $peerId');
     } catch (e) {
@@ -357,5 +361,88 @@ class WebRTCVoiceService {
     return pc.iceConnectionState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
         pc.iceConnectionState == RTCIceConnectionState.RTCIceConnectionStateCompleted ||
         pc.connectionState == RTCPeerConnectionState.RTCPeerConnectionStateConnected;
+  }
+
+  Future<void> _prepareLocalStream({required bool prewarmMuted}) async {
+    if (_localStream != null || _isPreparingLocalStream) return;
+    _isPreparingLocalStream = true;
+    try {
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': {
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
+          'channelCount': 1,
+          'sampleRate': 48000,
+          'latency': 0,
+        },
+        'video': false,
+      });
+      for (final t in stream.getAudioTracks()) {
+        t.enabled = !prewarmMuted;
+      }
+      _localStream = stream;
+      debugPrint('🎙️ Local stream prepared (muted=$prewarmMuted)');
+    } catch (e) {
+      debugPrint('⚠️ Could not prewarm local stream: $e');
+      if (!prewarmMuted) rethrow;
+    } finally {
+      _isPreparingLocalStream = false;
+    }
+  }
+
+  Future<void> _optimizeSender(RTCRtpSender sender) async {
+    try {
+      final params = sender.parameters;
+      final encodings = params.encodings;
+      if (encodings != null && encodings.isNotEmpty) {
+        encodings[0].maxBitrate = 128000;
+      }
+      await sender.setParameters(params);
+    } catch (_) {
+      // Best-effort optimization; ignore unsupported platform params.
+    }
+  }
+
+  String? _optimizeAudioSdp(String? sdp) {
+    if (sdp == null || sdp.isEmpty) return sdp;
+    final lines = sdp.split('\r\n');
+    String? opusPt;
+    for (final line in lines) {
+      if (line.startsWith('a=rtpmap:') && line.toLowerCase().contains('opus/48000')) {
+        opusPt = line.substring('a=rtpmap:'.length).split(' ').first;
+        break;
+      }
+    }
+    if (opusPt == null) return sdp;
+
+    final fmtpPrefix = 'a=fmtp:$opusPt ';
+    var hasFmtp = false;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith(fmtpPrefix)) {
+        hasFmtp = true;
+        final existing = lines[i].substring(fmtpPrefix.length);
+        final extras = [
+          'stereo=1',
+          'sprop-stereo=1',
+          'useinbandfec=1',
+          'cbr=1',
+          'maxaveragebitrate=128000',
+          'ptime=10',
+        ];
+        lines[i] = '$fmtpPrefix$existing;${extras.join(';')}';
+        break;
+      }
+    }
+
+    if (!hasFmtp) {
+      final idx = lines.indexWhere((l) => l.startsWith('a=rtpmap:$opusPt'));
+      if (idx != -1) {
+        lines.insert(idx + 1,
+            '${fmtpPrefix}stereo=1;sprop-stereo=1;useinbandfec=1;cbr=1;maxaveragebitrate=128000;ptime=10');
+      }
+    }
+
+    return lines.join('\r\n');
   }
 }
