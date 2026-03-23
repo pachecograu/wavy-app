@@ -54,7 +54,7 @@ class TrackProvider with ChangeNotifier {
         }
         
         // Auto-play for listeners only (DJ plays directly)
-        if (!_isOwner && url != null && url.isNotEmpty) {
+        if (!_isOwner && MusicService.isRemoteUrl(url)) {
           MusicService.playTrack(_currentTrack!);
         }
         
@@ -85,7 +85,7 @@ class TrackProvider with ChangeNotifier {
           _playedTracks = tracks;
           
           // Auto-play current track for listeners joining mid-session
-          if (!_isOwner && _currentTrack?.url != null && _currentTrack!.url!.isNotEmpty) {
+          if (!_isOwner && MusicService.isRemoteUrl(_currentTrack?.url)) {
             MusicService.playTrack(_currentTrack!);
           }
           

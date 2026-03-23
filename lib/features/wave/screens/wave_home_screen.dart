@@ -56,6 +56,8 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
   bool _appInForeground = true;
   bool _reactionListening = false;
   bool _locutorListening = false;
+  bool _p2pLocalTrackListening = false;
+  StreamSubscription<dynamic>? _p2pLocalTrackSub;
 
   @override
   void initState() {
@@ -126,6 +128,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     _chatNotifyTimer?.cancel();
     _posSub?.cancel();
     _stateSub?.cancel();
+    _p2pLocalTrackSub?.cancel();
     super.dispose();
   }
 
@@ -802,20 +805,15 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
           GestureDetector(
             onTap: () async {
               if (_hybrid == null) return;
-              if (_transmittingMic) {
-                // Keep DJ mic active; it will be released only when leaving DJ role.
-                return;
-              }
-
-              const enabling = true;
-              setState(() => _transmittingMic = true);
+              final enabling = !_transmittingMic;
+              setState(() => _transmittingMic = enabling);
               context.read<VoiceProvider>().toggleLocutor();
               try {
                 await _hybrid!.setMicrophoneEnabled(enabling);
               } catch (e) {
                 debugPrint('❌ Error enabling WebRTC mic: $e');
                 if (!mounted) return;
-                setState(() => _transmittingMic = false);
+                setState(() => _transmittingMic = !enabling);
               }
             },
             child: Container(
@@ -1256,7 +1254,25 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
         return GestureDetector(
           onTap: () async {
             setState(() => _selectedSong = track.url);
-            context.read<TrackProvider>().updateCurrentTrack(track.title, track.artist, url: track.url);
+            final trackProvider = context.read<TrackProvider>();
+
+            if (MusicService.isLocalFilePath(track.url)) {
+              final sent = await _hybrid?.broadcastLocalTrack(track) ?? false;
+              if (!sent) {
+                debugPrint('⚠️ P2P local track not sent (no active listener channels)');
+              }
+              trackProvider.updateCurrentTrack(
+                    track.title,
+                    track.artist,
+                    url: null,
+                  );
+            } else {
+              trackProvider.updateCurrentTrack(
+                    track.title,
+                    track.artist,
+                    url: track.url,
+                  );
+            }
             await MusicService.playTrack(track);
           },
           child: Container(
@@ -1360,6 +1376,24 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       _listenEmisorReconnect();
       _listenReactions();
       _listenLocutorVolume();
+      _listenP2PLocalTracks();
+    });
+  }
+
+  void _listenP2PLocalTracks() {
+    if (_p2pLocalTrackListening || _currentRole != UserRole.oyente || _hybrid == null) return;
+    _p2pLocalTrackListening = true;
+    _p2pLocalTrackSub = _hybrid!.incomingLocalTrackStream.listen((event) async {
+      if (!mounted) return;
+      final track = Track(
+        title: event.title,
+        artist: 'DJ',
+        url: event.localPath,
+        isCurrent: true,
+        playedAt: DateTime.now(),
+      );
+      setState(() => _selectedSong = event.localPath);
+      await MusicService.playTrack(track);
     });
   }
 

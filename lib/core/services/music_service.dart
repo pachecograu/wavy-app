@@ -149,12 +149,26 @@ class MusicService {
         playedAt: DateTime.now(),
       );
       _handler?.updateNowPlaying(track.title, track.artist);
-      await _audioPlayer.setUrl(track.url!);
+      if (isRemoteUrl(track.url)) {
+        await _audioPlayer.setUrl(track.url!);
+      } else {
+        await _audioPlayer.setFilePath(track.url!);
+      }
       await _audioPlayer.play();
-      debugPrint('Playing: ${track.title} from S3');
+      debugPrint('Playing: ${track.title}');
     } catch (e) {
       debugPrint('Error playing track: $e');
     }
+  }
+
+  static bool isRemoteUrl(String? value) {
+    if (value == null) return false;
+    return value.startsWith('http://') || value.startsWith('https://');
+  }
+
+  static bool isLocalFilePath(String? value) {
+    if (value == null || value.isEmpty) return false;
+    return !isRemoteUrl(value);
   }
 
   static Future<void> stopMusic() async {

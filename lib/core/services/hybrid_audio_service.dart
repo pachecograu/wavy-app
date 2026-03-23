@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'audio_service.dart';
 import 'webrtc_voice_service.dart';
 import '../socket/socket_service.dart';
+import '../models/track.dart';
 
 class HybridAudioService {
   static HybridAudioService? _instance;
@@ -22,6 +23,7 @@ class HybridAudioService {
   bool get isInRoom => _isInRoom;
   bool get isMicEnabled => _voice.isMicEnabled;
   bool get isVoiceConnected => _voice.isInitialized;
+  Stream<P2PLocalTrack> get incomingLocalTrackStream => _voice.incomingTrackStream;
 
   Future<void> joinRoom(String roomId, String userId, {bool isHost = false}) async {
     if (_isInRoom && _currentRoomId == roomId) return;
@@ -80,4 +82,10 @@ class HybridAudioService {
 
   Future<void> requestMicrophone() => _voice.enableMicrophone();
   Future<void> releaseMicrophone() => _voice.disableMicrophone();
+
+  Future<bool> broadcastLocalTrack(Track track) async {
+    final localPath = track.url;
+    if (localPath == null || localPath.isEmpty) return false;
+    return _voice.broadcastLocalTrack(localPath, track.title);
+  }
 }
