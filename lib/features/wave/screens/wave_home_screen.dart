@@ -1403,7 +1403,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     final vp = context.read<VoiceProvider>();
     vp.addListener(() {
       if (!mounted) return;
-      MusicService.audioPlayer.setVolume(vp.suggestedMusicVolume);
+      MusicService.audioPlayer.setVolume(1.0);
     });
   }
 

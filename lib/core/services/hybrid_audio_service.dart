@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
-import 'audio_service.dart';
 import 'webrtc_voice_service.dart';
+import 'music_service.dart';
 import '../socket/socket_service.dart';
 import '../models/track.dart';
 
@@ -12,7 +12,6 @@ class HybridAudioService {
   }
   HybridAudioService._internal();
 
-  final AudioService _audioService = AudioService();
   final WebRTCVoiceService _voice = WebRTCVoiceService();
   final SocketService _socket = SocketService();
 
@@ -57,7 +56,7 @@ class HybridAudioService {
   }
 
   Future<void> leaveRoom() async {
-    await _audioService.stopMusicStream();
+    await MusicService.audioPlayer.stop();
     await _voice.dispose();
     _socket.emit('leave_hybrid_room', {});
     _isInRoom = false;

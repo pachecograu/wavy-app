@@ -157,6 +157,18 @@ class MusicService {
       await _audioPlayer.play();
       debugPrint('Playing: ${track.title}');
     } catch (e) {
+      if (isLocalFilePath(track.url)) {
+        final path = track.url!;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+          await Future.delayed(Duration(milliseconds: 250 * attempt));
+          try {
+            await _audioPlayer.setFilePath(path);
+            await _audioPlayer.play();
+            debugPrint('Playing (retry $attempt): ${track.title}');
+            return;
+          } catch (_) {}
+        }
+      }
       debugPrint('Error playing track: $e');
     }
   }

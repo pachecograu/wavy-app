@@ -24,7 +24,6 @@ dependencies:
   file_picker: ^8.1.2
   
   # Audio streaming support
-  flutter_sound: ^9.2.13
   audio_session: ^0.1.16
   
   # State Management

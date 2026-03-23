@@ -6,7 +6,22 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import '../models/track.dart';
 import '../socket/socket_service.dart';
+
+class P2PProgramTrack {
+  final String title;
+  final String localPath;
+  final String fromUserId;
+  final String transferId;
+
+  P2PProgramTrack({
+    required this.title,
+    required this.localPath,
+    required this.fromUserId,
+    required this.transferId,
+  });
+}
 
 class P2PLocalTrack {
   final String title;
@@ -22,22 +37,17 @@ class P2PLocalTrack {
   });
 }
 
-class _IncomingTrackBuffer {
+class _IncomingProgramBuffer {
   final String transferId;
   final String title;
   final String fromUserId;
-  final String filePath;
-  final IOSink sink;
+  final List<int> bytes = <int>[];
+  bool isClosed = false;
 
-  int bytesReceived = 0;
-  bool playbackStarted = false;
-
-  _IncomingTrackBuffer({
+  _IncomingProgramBuffer({
     required this.transferId,
     required this.title,
     required this.fromUserId,
-    required this.filePath,
-    required this.sink,
   });
 }
 
@@ -49,11 +59,17 @@ class WebRTCVoiceService {
   final SocketService _socket = SocketService();
 
   final Map<String, RTCPeerConnection> _pcs = {};
-  final Map<String, RTCDataChannel> _musicChannels = {};
-  final Map<String, _IncomingTrackBuffer> _incomingTrackBuffers = {};
+  final Map<String, RTCDataChannel> _programChannels = {};
+  final Map<String, List<RTCIceCandidate>> _pendingIceCandidates = {};
+  final Set<String> _remoteDescriptionReadyPeers = <String>{};
+  final Map<String, int> _offerRetryEpochMs = {};
+  final Map<String, _IncomingProgramBuffer> _incomingProgramBuffers = {};
   final Map<String, String> _activeIncomingTransferByPeer = {};
-  final StreamController<P2PLocalTrack> _incomingTrackController =
-      StreamController<P2PLocalTrack>.broadcast();
+  final StreamController<P2PProgramTrack> _incomingProgramController =
+      StreamController<P2PProgramTrack>.broadcast();
+  HttpServer? _programRelayServer;
+  int? _programRelayPort;
+  bool _isStartingProgramRelay = false;
 
   MediaStream? _localStream;
   bool _micEnabled = false;
@@ -66,6 +82,9 @@ class WebRTCVoiceService {
 
   int _broadcastGeneration = 0;
   String? _currentOutgoingTransferId;
+  Track? _currentLocalProgramTrack;
+
+  static const int _programChunkSize = 12 * 1024;
 
   static const Map<String, dynamic> _iceConfig = {
     'iceServers': [
@@ -95,10 +114,11 @@ class WebRTCVoiceService {
 
     if (_isHost) {
       await _prepareLocalStream(prewarmMuted: true);
+    } else {
+      await _ensureProgramRelayServer();
     }
 
     if (!isHost && hostUserId != null) {
-      debugPrint('🎙️ Listener preconnect – requesting offer from $hostUserId');
       _requestOffer(hostUserId);
       if (micActive) {
         debugPrint('🎙️ Mic already active on join');
@@ -114,15 +134,19 @@ class WebRTCVoiceService {
     }
     _pcs.clear();
 
-    for (final channel in _musicChannels.values) {
+    for (final channel in _programChannels.values) {
       channel.close();
     }
-    _musicChannels.clear();
+    _programChannels.clear();
 
-    for (final transferId in _incomingTrackBuffers.keys.toList()) {
+    for (final transferId in _incomingProgramBuffers.keys.toList()) {
       await _cleanupIncomingTransfer(transferId);
     }
     _activeIncomingTransferByPeer.clear();
+
+    await _programRelayServer?.close(force: true);
+    _programRelayServer = null;
+    _programRelayPort = null;
 
     _localStream?.getTracks().forEach((t) => t.stop());
     await _localStream?.dispose();
@@ -133,6 +157,10 @@ class WebRTCVoiceService {
     _isHost = false;
     _hostUserId = null;
     _currentOutgoingTransferId = null;
+    _currentLocalProgramTrack = null;
+    _pendingIceCandidates.clear();
+    _remoteDescriptionReadyPeers.clear();
+    _offerRetryEpochMs.clear();
 
     if (_handlersRegistered) {
       _unregisterSignalingHandlers();
@@ -143,7 +171,16 @@ class WebRTCVoiceService {
   bool get isMicEnabled => _micEnabled;
   bool get isInitialized => _initialized;
   int get peerCount => _pcs.length;
-  Stream<P2PLocalTrack> get incomingTrackStream => _incomingTrackController.stream;
+  Stream<P2PProgramTrack> get incomingProgramStream => _incomingProgramController.stream;
+  Stream<P2PLocalTrack> get incomingTrackStream =>
+      _incomingProgramController.stream.map(
+        (event) => P2PLocalTrack(
+          title: event.title,
+          localPath: event.localPath,
+          fromUserId: event.fromUserId,
+          transferId: event.transferId,
+        ),
+      );
 
   Future<void> enableMicrophone() async {
     if (_micEnabled) return;
@@ -168,80 +205,212 @@ class WebRTCVoiceService {
     _socket.emit('mic_stopped', {});
   }
 
-  Future<bool> broadcastLocalTrack(String localPath, String title) async {
+  Future<bool> broadcastTrack(Track track) async {
     if (!_isHost) return false;
-
-    final openChannels = _musicChannels.values
+    final openChannels = _programChannels.values
         .where((c) => c.state == RTCDataChannelState.RTCDataChannelOpen)
         .toList();
     if (openChannels.isEmpty) return false;
 
-    final file = File(localPath);
-    if (!await file.exists()) return false;
+    return _sendTrackToChannels(track, openChannels);
+  }
 
-    final bytes = await file.readAsBytes();
-    if (bytes.isEmpty) return false;
+  Future<bool> _sendTrackToChannels(
+    Track track,
+    List<RTCDataChannel> channels,
+  ) async {
+    final source = track.url;
+    if (source == null || source.isEmpty) return false;
+
+    final stream = await _openTrackByteStream(source);
+    if (stream == null) return false;
+
+    final transferId =
+        '${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(1 << 31)}';
 
     _broadcastGeneration += 1;
     final generation = _broadcastGeneration;
 
     if (_currentOutgoingTransferId != null) {
-      for (final ch in openChannels) {
-        _sendDataJson(ch, {
-          't': 'track_stop',
+      for (final ch in channels) {
+        _sendProgramJson(ch, {
+          't': 'program_stop',
           'id': _currentOutgoingTransferId,
         });
       }
     }
-
-    final transferId =
-        '${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(1 << 31)}';
     _currentOutgoingTransferId = transferId;
 
-    const chunkSize = 12 * 1024;
-    final totalChunks = (bytes.length / chunkSize).ceil();
-
-    for (final ch in openChannels) {
-      _sendDataJson(ch, {
-        't': 'track_start',
+    final startedAt = DateTime.now().millisecondsSinceEpoch;
+    for (final ch in channels) {
+      _sendProgramJson(ch, {
+        't': 'program_start',
         'id': transferId,
-        'title': title,
-        'size': bytes.length,
-        'chunks': totalChunks,
+        'title': track.title,
+        'startedAt': startedAt,
       });
     }
 
-    for (var index = 0; index < totalChunks; index++) {
+    var sentBytes = 0;
+    var firstChunkAt = DateTime.now().millisecondsSinceEpoch;
+
+    await for (final rawChunk in stream) {
       if (generation != _broadcastGeneration) {
         return false;
       }
 
-      final start = index * chunkSize;
-      final end = min(start + chunkSize, bytes.length);
-      final chunkPayload = {
-        't': 'track_chunk',
-        'id': transferId,
-        'i': index,
-        'd': base64Encode(bytes.sublist(start, end)),
-      };
+      var offset = 0;
+      while (offset < rawChunk.length) {
+        final end = min(offset + _programChunkSize, rawChunk.length);
+        final piece = rawChunk.sublist(offset, end);
+        offset = end;
 
-      for (final ch in openChannels) {
-        _sendDataJson(ch, chunkPayload);
-      }
+        final payload = {
+          't': 'program_chunk',
+          'id': transferId,
+          'd': base64Encode(piece),
+        };
 
-      if (index > 24) {
-        await Future.delayed(const Duration(milliseconds: 24));
+        for (final ch in channels) {
+          _sendProgramJson(ch, payload);
+          await _applyDynamicPacing(
+            channel: ch,
+            sentBytes: sentBytes,
+            firstChunkAt: firstChunkAt,
+          );
+        }
+
+        sentBytes += piece.length;
       }
     }
 
-    for (final ch in openChannels) {
-      _sendDataJson(ch, {
-        't': 'track_end',
+    for (final ch in channels) {
+      _sendProgramJson(ch, {
+        't': 'program_end',
         'id': transferId,
       });
     }
 
     return true;
+  }
+
+  Future<bool> broadcastLocalTrack(String localPath, String title) {
+    _currentLocalProgramTrack = Track(
+      title: title,
+      artist: 'DJ',
+      url: localPath,
+      isCurrent: true,
+      playedAt: DateTime.now(),
+    );
+    return broadcastTrack(_currentLocalProgramTrack!);
+  }
+
+  Future<Stream<List<int>>?> _openTrackByteStream(String source) async {
+    if (source.startsWith('http://') || source.startsWith('https://')) {
+      final client = HttpClient();
+      final request = await client.getUrl(Uri.parse(source));
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        client.close(force: true);
+        return null;
+      }
+      return response;
+    }
+
+    final file = File(source);
+    if (!await file.exists()) return null;
+    return file.openRead();
+  }
+
+  Future<void> _ensureProgramRelayServer() async {
+    if (_programRelayServer != null || _isStartingProgramRelay) return;
+
+    _isStartingProgramRelay = true;
+    try {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      _programRelayServer = server;
+      _programRelayPort = server.port;
+
+      server.listen((request) async {
+        try {
+          final segments = request.uri.pathSegments;
+          if (segments.length < 2 || segments[0] != 'program') {
+            request.response.statusCode = HttpStatus.notFound;
+            await request.response.close();
+            return;
+          }
+
+          final transferId = segments[1].replaceAll('.mp3', '');
+          final buffer = _incomingProgramBuffers[transferId];
+          if (buffer == null) {
+            request.response.statusCode = HttpStatus.notFound;
+            await request.response.close();
+            return;
+          }
+          request.response.headers.contentType = ContentType('audio', 'mpeg');
+          request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+
+          var cursor = 0;
+          while (true) {
+            final available = buffer.bytes.length;
+            if (cursor < available) {
+              request.response.add(buffer.bytes.sublist(cursor, available));
+              cursor = available;
+              continue;
+            }
+
+            if (buffer.isClosed) {
+              break;
+            }
+
+            await Future.delayed(const Duration(milliseconds: 35));
+          }
+
+          await request.response.close();
+        } catch (_) {
+          try {
+            request.response.statusCode = HttpStatus.internalServerError;
+            await request.response.close();
+          } catch (_) {}
+        }
+      });
+    } finally {
+      _isStartingProgramRelay = false;
+    }
+  }
+
+  Future<void> _applyDynamicPacing({
+    required RTCDataChannel channel,
+    required int sentBytes,
+    required int firstChunkAt,
+  }) async {
+    int bufferedAmount;
+    try {
+      bufferedAmount = channel.bufferedAmount ?? 0;
+    } catch (_) {
+      bufferedAmount = 0;
+    }
+
+    if (bufferedAmount > 1024 * 1024) {
+      await Future.delayed(const Duration(milliseconds: 80));
+      return;
+    }
+    if (bufferedAmount > 512 * 1024) {
+      await Future.delayed(const Duration(milliseconds: 40));
+      return;
+    }
+    if (bufferedAmount > 256 * 1024) {
+      await Future.delayed(const Duration(milliseconds: 20));
+      return;
+    }
+
+    final elapsedMs = DateTime.now().millisecondsSinceEpoch - firstChunkAt;
+    if (elapsedMs <= 0) return;
+
+    final currentBps = (sentBytes * 1000) ~/ elapsedMs;
+    if (currentBps > 220000) {
+      await Future.delayed(const Duration(milliseconds: 8));
+    }
   }
 
   void _registerSignalingHandlers() {
@@ -254,6 +423,13 @@ class WebRTCVoiceService {
       await _createAndSendOffer(fromUserId);
     });
 
+    _socket.on('user_joined_room', (data) async {
+      final userId = data['userId']?.toString();
+      final isHost = data['isHost'] == true;
+      if (!_isHost || isHost || userId == null) return;
+      await _createAndSendOffer(userId);
+    });
+
     _socket.on('webrtc_answer', (data) async {
       final fromUserId = data['fromUserId']?.toString();
       final sdpMap = data['sdp'];
@@ -264,6 +440,8 @@ class WebRTCVoiceService {
       await pc.setRemoteDescription(
         RTCSessionDescription(sdpMap['sdp'], sdpMap['type']),
       );
+      _remoteDescriptionReadyPeers.add(fromUserId);
+      await _flushPendingIceCandidates(fromUserId);
     });
 
     _socket.on('mic_started', (data) {
@@ -288,14 +466,18 @@ class WebRTCVoiceService {
       final candMap = data['candidate'];
       if (fromUserId == null || candMap == null) return;
       final pc = _pcs[fromUserId];
-      if (pc == null) return;
+      final candidate = RTCIceCandidate(
+        candMap['candidate'],
+        candMap['sdpMid'],
+        candMap['sdpMLineIndex'],
+      );
+      if (pc == null || !_remoteDescriptionReadyPeers.contains(fromUserId)) {
+        _pendingIceCandidates.putIfAbsent(fromUserId, () => <RTCIceCandidate>[]).add(candidate);
+        return;
+      }
 
       try {
-        await pc.addCandidate(RTCIceCandidate(
-          candMap['candidate'],
-          candMap['sdpMid'],
-          candMap['sdpMLineIndex'],
-        ));
+        await pc.addCandidate(candidate);
       } catch (_) {}
     });
 
@@ -309,6 +491,7 @@ class WebRTCVoiceService {
 
   void _unregisterSignalingHandlers() {
     _socket.off('webrtc_offer_requested');
+    _socket.off('user_joined_room');
     _socket.off('webrtc_answer');
     _socket.off('mic_started');
     _socket.off('mic_stopped');
@@ -326,16 +509,35 @@ class WebRTCVoiceService {
 
     if (_isHost) {
       final channel = await pc.createDataChannel(
-        'music',
+        'program',
         RTCDataChannelInit()
-          ..ordered = true
-          ..maxRetransmits = 5,
+          ..ordered = true,
       );
-      _registerMusicChannel(peerId, channel);
+      _registerProgramChannel(peerId, channel);
     }
 
     pc.onDataChannel = (channel) {
-      _registerMusicChannel(peerId, channel);
+      _registerProgramChannel(peerId, channel);
+    };
+
+    pc.onConnectionState = (state) {
+      debugPrint('🎙️ PC[$peerId] connectionState=$state');
+      if (!_isHost &&
+          (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+              state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) &&
+          _hostUserId == peerId) {
+        _scheduleOfferRetry(peerId);
+      }
+    };
+
+    pc.onIceConnectionState = (state) {
+      debugPrint('🎙️ PC[$peerId] iceConnectionState=$state');
+      if (!_isHost &&
+          (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
+              state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) &&
+          _hostUserId == peerId) {
+        _scheduleOfferRetry(peerId);
+      }
     };
 
     pc.onIceCandidate = (candidate) {
@@ -389,6 +591,8 @@ class WebRTCVoiceService {
     await pc.setRemoteDescription(
       RTCSessionDescription(sdpMap['sdp'], sdpMap['type']),
     );
+    _remoteDescriptionReadyPeers.add(peerId);
+    await _flushPendingIceCandidates(peerId);
 
     final answer = await pc.createAnswer({});
     final optimizedAnswerSdp = _optimizeAudioSdp(answer.sdp);
@@ -401,13 +605,40 @@ class WebRTCVoiceService {
   }
 
   void _closePc(String peerId) {
-    _musicChannels.remove(peerId)?.close();
+    _programChannels.remove(peerId)?.close();
     _pcs.remove(peerId)?.close();
+    _remoteDescriptionReadyPeers.remove(peerId);
+    _pendingIceCandidates.remove(peerId);
 
     final incomingTransfer = _activeIncomingTransferByPeer.remove(peerId);
     if (incomingTransfer != null) {
       _cleanupIncomingTransfer(incomingTransfer);
     }
+  }
+
+  Future<void> _flushPendingIceCandidates(String peerId) async {
+    final pc = _pcs[peerId];
+    final pending = _pendingIceCandidates.remove(peerId);
+    if (pc == null || pending == null || pending.isEmpty) return;
+
+    for (final candidate in pending) {
+      try {
+        await pc.addCandidate(candidate);
+      } catch (_) {}
+    }
+  }
+
+  void _scheduleOfferRetry(String peerId) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final last = _offerRetryEpochMs[peerId] ?? 0;
+    if (now - last < 2500) return;
+    _offerRetryEpochMs[peerId] = now;
+
+    Future.delayed(const Duration(milliseconds: 700), () {
+      if (!_isHost && _hostUserId == peerId && !_hasUsableConnection(peerId)) {
+        _requestOffer(peerId);
+      }
+    });
   }
 
   bool _hasUsableConnection(String peerId) {
@@ -427,10 +658,17 @@ class WebRTCVoiceService {
       final stream = await navigator.mediaDevices.getUserMedia({
         'audio': {
           'echoCancellation': true,
-          'noiseSuppression': true,
+          'noiseSuppression': false,
           'autoGainControl': true,
+          'googEchoCancellation': true,
+          'googAutoGainControl': true,
+          'googAutoGainControl2': true,
+          'googNoiseSuppression': false,
+          'googNoiseSuppression2': false,
+          'googHighpassFilter': true,
           'channelCount': 1,
           'sampleRate': 48000,
+          'sampleSize': 16,
           'latency': 0,
         },
         'video': false,
@@ -450,7 +688,7 @@ class WebRTCVoiceService {
       final params = sender.parameters;
       final encodings = params.encodings;
       if (encodings != null && encodings.isNotEmpty) {
-        encodings[0].maxBitrate = 128000;
+        encodings[0].maxBitrate = 192000;
       }
       await sender.setParameters(params);
     } catch (_) {}
@@ -481,7 +719,7 @@ class WebRTCVoiceService {
           'sprop-stereo=1',
           'useinbandfec=1',
           'cbr=1',
-          'maxaveragebitrate=128000',
+          'maxaveragebitrate=192000',
           'ptime=10',
         ];
         lines[i] = '$fmtpPrefix$existing;${extras.join(';')}';
@@ -494,7 +732,7 @@ class WebRTCVoiceService {
       if (idx != -1) {
         lines.insert(
           idx + 1,
-          '${fmtpPrefix}stereo=1;sprop-stereo=1;useinbandfec=1;cbr=1;maxaveragebitrate=128000;ptime=10',
+          '${fmtpPrefix}stereo=1;sprop-stereo=1;useinbandfec=1;cbr=1;maxaveragebitrate=192000;ptime=10',
         );
       }
     }
@@ -502,8 +740,17 @@ class WebRTCVoiceService {
     return lines.join('\r\n');
   }
 
-  void _registerMusicChannel(String peerId, RTCDataChannel channel) {
-    _musicChannels[peerId] = channel;
+  void _registerProgramChannel(String peerId, RTCDataChannel channel) {
+    _programChannels[peerId] = channel;
+
+    channel.onDataChannelState = (state) async {
+      debugPrint('🎵 Program channel[$peerId] state=$state');
+      if (_isHost &&
+          state == RTCDataChannelState.RTCDataChannelOpen &&
+          _currentLocalProgramTrack != null) {
+        await _sendTrackToChannels(_currentLocalProgramTrack!, [channel]);
+      }
+    };
 
     channel.onMessage = (message) async {
       try {
@@ -512,90 +759,75 @@ class WebRTCVoiceService {
         final transferId = data['id']?.toString();
         if (type == null || transferId == null) return;
 
-        if (type == 'track_stop') {
+        if (type == 'program_stop') {
           await _cleanupIncomingTransfer(transferId);
           return;
         }
 
-        if (type == 'track_start') {
+        if (type == 'program_start') {
+          await _ensureProgramRelayServer();
           final previousTransfer = _activeIncomingTransferByPeer[peerId];
           if (previousTransfer != null && previousTransfer != transferId) {
             await _cleanupIncomingTransfer(previousTransfer);
           }
 
-          final filePath =
-              '${Directory.systemTemp.path}/wavy_p2p_${DateTime.now().millisecondsSinceEpoch}.mp3';
-          final sink = File(filePath).openWrite(mode: FileMode.writeOnlyAppend);
+          final relayPort = _programRelayPort;
+          if (relayPort == null) return;
 
-          _incomingTrackBuffers[transferId] = _IncomingTrackBuffer(
+          _incomingProgramBuffers[transferId] = _IncomingProgramBuffer(
             transferId: transferId,
             title: data['title']?.toString() ?? 'Track',
             fromUserId: peerId,
-            filePath: filePath,
-            sink: sink,
           );
           _activeIncomingTransferByPeer[peerId] = transferId;
+
+          _incomingProgramController.add(
+            P2PProgramTrack(
+              title: data['title']?.toString() ?? 'Track',
+              localPath: 'http://127.0.0.1:$relayPort/program/$transferId.mp3',
+              fromUserId: peerId,
+              transferId: transferId,
+            ),
+          );
           return;
         }
 
-        final buffer = _incomingTrackBuffers[transferId];
+        final buffer = _incomingProgramBuffers[transferId];
         if (buffer == null) return;
 
-        if (type == 'track_chunk') {
+        if (type == 'program_chunk') {
           final encoded = data['d']?.toString();
           if (encoded == null || encoded.isEmpty) return;
-          final chunkBytes = base64Decode(encoded);
-          buffer.sink.add(chunkBytes);
-          buffer.bytesReceived += chunkBytes.length;
 
-          if (!buffer.playbackStarted && buffer.bytesReceived >= 256 * 1024) {
-            buffer.playbackStarted = true;
-            _incomingTrackController.add(
-              P2PLocalTrack(
-                title: buffer.title,
-                localPath: buffer.filePath,
-                fromUserId: buffer.fromUserId,
-                transferId: buffer.transferId,
-              ),
-            );
-          }
+          final chunkBytes = base64Decode(encoded);
+          buffer.bytes.addAll(chunkBytes);
           return;
         }
 
-        if (type == 'track_end') {
-          await buffer.sink.flush();
-          await buffer.sink.close();
+        if (type == 'program_end') {
+          buffer.isClosed = true;
 
-          if (!buffer.playbackStarted) {
-            _incomingTrackController.add(
-              P2PLocalTrack(
-                title: buffer.title,
-                localPath: buffer.filePath,
-                fromUserId: buffer.fromUserId,
-                transferId: buffer.transferId,
-              ),
-            );
-          }
-
-          _incomingTrackBuffers.remove(transferId);
+          Future.delayed(const Duration(seconds: 20), () {
+            _incomingProgramBuffers.remove(transferId);
+          });
+          _activeIncomingTransferByPeer.removeWhere((_, value) => value == transferId);
         }
       } catch (e) {
-        debugPrint('⚠️ DataChannel parse error: $e');
+        debugPrint('⚠️ Program DataChannel parse error: $e');
       }
     };
   }
 
   Future<void> _cleanupIncomingTransfer(String transferId) async {
-    final buffer = _incomingTrackBuffers.remove(transferId);
+    final buffer = _incomingProgramBuffers.remove(transferId);
     if (buffer == null) return;
 
-    await buffer.sink.flush();
-    await buffer.sink.close();
+    buffer.isClosed = true;
 
     _activeIncomingTransferByPeer.removeWhere((_, value) => value == transferId);
   }
 
-  void _sendDataJson(RTCDataChannel channel, Map<String, dynamic> payload) {
+  void _sendProgramJson(RTCDataChannel channel, Map<String, dynamic> payload) {
     channel.send(RTCDataChannelMessage(jsonEncode(payload)));
   }
 }

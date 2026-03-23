@@ -1,154 +1,134 @@
-# 🌊 WAVY App
+# WAVY App (Frontend)
 
-Flutter app for WAVY - Live Audio Social Platform
+Aplicación Flutter para la experiencia en vivo de WAVY: waves, chat en tiempo real, voz por WebRTC y reproducción sincronizada.
 
-## 🎯 What is WAVY?
+## Estado actual
 
-WAVY is a live audio social platform where users can:
-- **Share music** in real-time with others
-- **Listen together** to live audio streams  
-- **Interact socially** through chat and voice
-- **Create communities** around shared music experiences
+- Proyecto activo en este repo: Android + Web.
+- Arquitectura de estado con `Provider`.
+- Señalización y eventos en tiempo real con `Socket.IO`.
+- Reproducción musical con `just_audio` + `audio_service`.
+- Voz y transporte P2P con `flutter_webrtc`.
 
-## 🧱 Architecture
+## Flujo funcional
 
-- **Flutter** (Android, iOS, Web)
-- **Socket.IO** for real-time communication
-- **WebRTC** for audio streaming
-- **Provider** for state management
-- **Premium UI** with red color scheme
+### Roles
 
-## 🚀 Quick Start
+- **Oyente**
+  - Se conecta a una wave existente.
+  - Recibe audio en vivo y sincronización de reproducción.
+  - Participa en chat/reacciones.
+  - Puede subir al micrófono por invitación.
 
-1. **Prerequisites**
-   - Flutter SDK 3.10.1+
-   - Android Studio / Xcode
+- **DJ (emisor)**
+  - Crea/gestiona su wave.
+  - Inicia y controla reproducción.
+  - Envía audio local a oyentes por canal P2P.
+  - Gestiona locutores e interacción social.
 
-2. **Install dependencies**
-   ```bash
-   flutter pub get
-   ```
+### Ciclo general
 
-3. **Run on Android**
-   ```bash
-   flutter run -d android
-   ```
+1. `AuthProvider` inicializa usuario anónimo por dispositivo.
+2. `WaveProvider` crea o conecta la wave.
+3. `HybridAudioService`/`WebRTCVoiceService` establecen voz y transporte P2P.
+4. `TrackProvider` + `MusicService` gestionan pista actual y reproducción.
+5. `PlaybackSyncService` corrige drift y mantiene sincronía DJ/oyentes.
+6. `ChatProvider` y `VoiceProvider` manejan chat, reacciones e invitaciones a mic.
 
-4. **Run on Web**
-   ```bash
-   flutter run -d chrome
-   ```
+## Arquitectura (código real)
 
-## 🌐 Backend Configuration
+### Providers principales
 
-The app is configured to connect to AWS backend:
+- `AuthProvider`: identidad local, sesión y conexión inicial al socket.
+- `WaveProvider`: estado de wave, creación/unión/salida y ownership.
+- `TrackProvider`: pista actual, lista de tracks y estado de reproducción compartido.
+- `VoiceProvider`: permisos de locutor, invitaciones, control de micrófono.
+- `ChatProvider`: mensajes públicos/privados.
+- `QualityProvider`: métricas de calidad local/resumen por oyente.
 
-**Backend URL**: `http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com`
+### Servicios clave
 
-Configuration file: `lib/core/config/app_config.dart`
+- `SocketService`: singleton para conexión, reconexión y eventos Socket.IO.
+- `MusicService`: control del `AudioPlayer`, catálogo S3 y reproducción local/remota.
+- `WebRTCVoiceService`:
+  - señalización WebRTC;
+  - voz entre peers;
+  - DataChannel para envío de programa (`program_start/chunk/end/stop`);
+  - relay local HTTP (`127.0.0.1`) para alimentar `just_audio` en oyentes.
+- `HybridAudioService`: orquesta entrada/salida de sala y puente con voz WebRTC.
+- `PlaybackSyncService`: sincronización de tiempo/posición entre DJ y oyentes.
+- `NotificationService`: inicialización y notificaciones locales.
 
-## 📱 Features
+## Configuración backend
 
-### Core Features
-- ✅ Real-time audio streaming
-- ✅ Live chat (public & private)
-- ✅ Wave creation and joining
-- ✅ Listener count tracking
-- ✅ Mic invitations for listeners
+Configuración central en `lib/core/config/app_config.dart`:
 
-### UI Features  
-- ✅ Premium dark theme with red accents
-- ✅ Reactive particle background
-- ✅ Sliding panels for chat and playlists
-- ✅ Smooth animations and transitions
+- `backendUrl`: `https://wavy-alb-1189004548.us-east-1.elb.amazonaws.com`
+- `socketUrl`: mismo host del backend.
+- `apiUrl`: `$backendUrl/api`
+- `hlsStreamUrl`: `http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com/hls`
 
-### Social Features
-- ✅ Public chat for all listeners
-- ✅ Private chat (owner ↔ listener only)
-- ✅ Live reactions (⭐❤️🔥)
-- ✅ Mic invitations and voice interaction
+Nota: el proyecto define `HttpOverrides` permisivo en `main.dart` para certificados.
 
-## 🎨 UI Structure
+## Estructura relevante
 
+- `lib/main.dart`: bootstrap (`AudioService`, providers, app root).
+- `lib/core/config/app_config.dart`: endpoints y constantes de audio.
+- `lib/core/socket/socket_service.dart`: transporte de eventos real-time.
+- `lib/core/services/`: música, sincronización, voz WebRTC, notificaciones.
+- `lib/features/*/providers/`: estado por dominio (auth, wave, chat, track, voice, quality).
+- `lib/features/wave/screens/wave_home_screen.dart`: pantalla principal operativa.
+
+## Ejecutar local
+
+### Requisitos
+
+- Flutter SDK `>=3.8.1 <4.0.0`
+- Dart SDK compatible con la versión de Flutter instalada
+- Android SDK (para ejecutar en dispositivo/emulador Android)
+
+### Comandos
+
+```bash
+flutter pub get
+flutter run -d android
 ```
-Stack
-├── Particle Background (reactive to audio)
-└── Main Content
-    ├── Wave Info (name, DJ, listeners, status)
-    ├── Audio Player
-    ├── Chat Slide Panel →
-    ├── Playlist Slide Panel → (owner only)
-    └── Discover Waves Panel → (listeners only)
+
+Para web:
+
+```bash
+flutter run -d chrome
 ```
 
-## 🔐 User Roles
+## Build
 
-### Listener
-- Listen to audio streams
-- Send public messages
-- Receive private messages from owner
-- Accept mic invitations
-- Switch between waves
-
-### Owner (Broadcaster)
-- Control audio stream
-- Manage playlist
-- Send public/private messages
-- Invite listeners to mic
-- Moderate chat
-
-## 🧩 State Management
-
-Using **Provider** pattern:
-- `AuthProvider` - User authentication
-- `WaveProvider` - Wave state and audio
-- `ChatProvider` - Chat messages
-- `UIProvider` - Slide panels and navigation
-
-## 📦 Dependencies
-
-### Core
-- `socket_io_client` - Real-time communication
-- `flutter_webrtc` - Audio streaming
-- `just_audio` - Audio playback
-- `provider` - State management
-- `livekit_client` - WebRTC voice
-
-### UI & Utils
-- `flutter_animate` - Smooth animations
-- `permission_handler` - Microphone permissions
-- `shared_preferences` - Local storage
-
-## 🎵 Audio Flow
-
-1. **Owner** starts broadcasting
-2. **Backend** creates wave and notifies clients
-3. **Listeners** join wave and receive audio stream
-4. **Real-time** sync ensures everyone hears the same thing
-5. **Mic invitations** allow voice interaction
-
-## 🚀 Build for Production
-
-### Android
 ```bash
 flutter build apk --release
-```
-
-### iOS  
-```bash
-flutter build ios --release
-```
-
-### Web
-```bash
 flutter build web --release
 ```
 
-## 📚 Documentation
+## Permisos Android usados
 
-- **AWS Deployment**: See `AWS_ALB_DEPLOYMENT.md`
-- **Backend Repository**: [wavy-backend](https://github.com/pachecograu/wavy-backend)
+Definidos en `android/app/src/main/AndroidManifest.xml`:
 
----
+- `INTERNET`
+- `RECORD_AUDIO`
+- `MODIFY_AUDIO_SETTINGS`
+- `ACCESS_NETWORK_STATE`
+- `CAMERA`
+- `WAKE_LOCK`
+- `FOREGROUND_SERVICE`
+- `FOREGROUND_SERVICE_MEDIA_PLAYBACK`
+- `POST_NOTIFICATIONS`
 
-Built with ❤️ for the WAVY community
+## Troubleshooting rápido
+
+- Si el oyente no recibe audio, validar conexión socket + eventos de señalización WebRTC.
+- Si hay cortes/reconexión en reproducción, revisar relay local y estado de DataChannel.
+- Si falla reproducción remota, validar URL efectiva en `TrackProvider` y `MusicService`.
+- Si el mic no transmite, verificar permisos Android y estado de invitación en `VoiceProvider`.
+
+## Documentación relacionada
+
+- Infra app/backend: `AWS_ALB_DEPLOYMENT.md`
+- Backend API/socket: repo `wavy-backend`

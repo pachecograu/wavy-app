@@ -7,17 +7,4 @@ class AppConfig {
   // Socket.IO para realtime
   static String get socketUrl => backendUrl;
   static String get apiUrl => '$backendUrl/api';
-  
-  // HLS usa HTTP porque ExoPlayer no confía en certificados self-signed del ALB
-  static String get hlsStreamUrl => 'http://wavy-alb-1189004548.us-east-1.elb.amazonaws.com/hls';
-  
-  // WebRTC para voz (LiveKit)
-  // El backend retorna la URL correcta en el token
-  static String get liveKitUrl => 'wss://wavy-alb-1189004548.us-east-1.elb.amazonaws.com:7880';
-  
-  // Configuración de audio
-  static const String musicFormat = 'aac'; // AAC para música
-  static const String voiceFormat = 'opus'; // Opus para voz
-  static const int hlsSegmentDuration = 2; // 2 segundos por segmento
-  static const int maxVoiceParticipants = 10; // Máximo en mic
 }

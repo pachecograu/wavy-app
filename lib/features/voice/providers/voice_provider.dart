@@ -44,7 +44,7 @@ class VoiceProvider with ChangeNotifier {
         final d = _toMap(data);
         _locutorActive = true;
         _micVolume = (d['micVolume'] as num?)?.toDouble() ?? 1.0;
-        _suggestedMusicVolume = (d['suggestedMusicVolume'] as num?)?.toDouble() ?? 0.3;
+        _suggestedMusicVolume = (d['suggestedMusicVolume'] as num?)?.toDouble() ?? 0.2;
         notifyListeners();
       } catch (e) {
         debugPrint('Error parsing locutor-on: $e');
@@ -61,7 +61,7 @@ class VoiceProvider with ChangeNotifier {
       try {
         final d = _toMap(data);
         _micVolume = (d['micVolume'] as num?)?.toDouble() ?? 1.0;
-        _suggestedMusicVolume = (d['suggestedMusicVolume'] as num?)?.toDouble() ?? 0.3;
+        _suggestedMusicVolume = (d['suggestedMusicVolume'] as num?)?.toDouble() ?? 0.2;
         notifyListeners();
       } catch (e) {
         debugPrint('Error parsing locutor-balance-update: $e');
@@ -121,7 +121,7 @@ class VoiceProvider with ChangeNotifier {
         'micVolume': _micVolume,
       });
       _locutorActive = true;
-      _suggestedMusicVolume = 0.3;
+      _suggestedMusicVolume = 0.2;
     }
     notifyListeners();
   }
