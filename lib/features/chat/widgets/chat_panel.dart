@@ -18,16 +18,45 @@ class ChatPanel extends StatefulWidget {
 class _ChatPanelState extends State<ChatPanel> {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
+  int _previousMessageCount = 0;
 
   @override
   void initState() {
     super.initState();
     final auth = context.read<AuthProvider>();
-    context.read<ChatProvider>().initialize(widget.waveId, auth.userId!);
+    final chat = context.read<ChatProvider>();
+    chat.initialize(widget.waveId, auth.userId!);
+    _previousMessageCount = chat.publicMessages.length;
+    // Auto-scroll to bottom whenever new messages arrive
+    chat.addListener(_onMessagesChanged);
+    // Scroll to bottom after first frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToBottom();
+    });
+  }
+
+  void _onMessagesChanged() {
+    final chat = context.read<ChatProvider>();
+    if (chat.publicMessages.length != _previousMessageCount) {
+      _previousMessageCount = chat.publicMessages.length;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    }
+  }
+
+  void _scrollToBottom() {
+    if (_scrollController.hasClients &&
+        _scrollController.position.maxScrollExtent > 0) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    }
   }
 
   @override
   void dispose() {
+    context.read<ChatProvider>().removeListener(_onMessagesChanged);
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -38,15 +67,7 @@ class _ChatPanelState extends State<ChatPanel> {
     if (text.isEmpty) return;
     context.read<ChatProvider>().sendPublicMessage(text);
     _controller.clear();
-    Future.delayed(const Duration(milliseconds: 100), () {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+    Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
   }
 
   @override

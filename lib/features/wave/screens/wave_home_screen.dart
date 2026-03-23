@@ -11,7 +11,6 @@ import '../../../core/models/track.dart';
 import '../../../core/services/hybrid_audio_service.dart';
 import '../../../core/services/notification_service.dart';
 import '../../../core/socket/socket_service.dart';
-import '../../../core/services/mic_stream_service.dart';
 import '../../../core/services/playback_sync_service.dart';
 import '../providers/wave_provider.dart';
 import '../widgets/wave_list.dart';
@@ -152,10 +151,6 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     debugPrint('🚀 _startTransmitting called, socket connected: ${wp.toString()}');
     wp.addListener(_onWaveCreated);
     wp.createWave(waveName, djName);
-    _hybrid = HybridAudioService();
-    try {
-      await _hybrid!.joinRoom('test-wave', 'emisor-${DateTime.now().millisecondsSinceEpoch}', isHost: true);
-    } catch (_) {}
   }
 
   void _onWaveCreated() {
@@ -168,10 +163,21 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       context.read<ChatProvider>().initialize(waveId, userId);
       context.read<TrackProvider>().initialize(waveId, isOwner: true);
       context.read<VoiceProvider>().initialize(waveId, userId, isOwner: true);
+      _connectHybridVoice(waveId, userId, isHost: true);
       PlaybackSyncService.startAsDJ(waveId);
       _listenChatNotifications();
       _listenReactions();
       _listenLocutorVolume();
+    }
+  }
+
+  Future<void> _connectHybridVoice(String waveId, String userId, {required bool isHost}) async {
+    _hybrid ??= HybridAudioService();
+    try {
+      await _hybrid!.joinRoom(waveId, userId, isHost: isHost);
+      await _hybrid!.ensureVoiceConnected();
+    } catch (e) {
+      debugPrint('❌ Hybrid voice connect error: $e');
     }
   }
 
@@ -279,8 +285,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     }
     await MusicService.stopMusic();
     PlaybackSyncService.stop();
-    MicStreamService.stopBroadcasting();
-    MicStreamService.stopListening();
+    await _hybrid?.leaveRoom();
     if (_currentRole == UserRole.emisor && wp.currentWave != null) {
       if (wp.isStreaming) await wp.stopStreaming();
       await wp.stopWave();
@@ -780,13 +785,16 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
             ),
           GestureDetector(
             onTap: () async {
-              final wp = context.read<WaveProvider>();
-              setState(() => _transmittingMic = !_transmittingMic);
+              if (_hybrid == null) return;
+              final enabling = !_transmittingMic;
+              setState(() => _transmittingMic = enabling);
               context.read<VoiceProvider>().toggleLocutor();
-              if (_transmittingMic && wp.currentWave != null) {
-                await MicStreamService.startBroadcasting(wp.currentWave!.id);
-              } else {
-                await MicStreamService.stopBroadcasting();
+              try {
+                await _hybrid!.setMicrophoneEnabled(enabling);
+              } catch (e) {
+                debugPrint('❌ Error toggling LiveKit mic: $e');
+                if (!mounted) return;
+                setState(() => _transmittingMic = !enabling);
               }
             },
             child: Container(
@@ -1274,14 +1282,18 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
     final width = MediaQuery.of(context).size.width * 0.85;
     return Stack(
       children: [
-        if (_chatVisible)
-          GestureDetector(
-            onTap: () => setState(() => _chatVisible = false),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              color: _chatVisible ? Colors.black.withValues(alpha: 0.4) : Colors.transparent,
+        // Always keep in tree (never conditional) so AnimatedPositioned stays at index 1 always
+        IgnorePointer(
+          ignoring: !_chatVisible,
+          child: AnimatedOpacity(
+            opacity: _chatVisible ? 1.0 : 0.0,
+            duration: const Duration(milliseconds: 300),
+            child: GestureDetector(
+              onTap: () => setState(() => _chatVisible = false),
+              child: Container(color: Colors.black.withValues(alpha: 0.4)),
             ),
           ),
+        ),
         AnimatedPositioned(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOutCubic,
@@ -1308,21 +1320,21 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
 
   // ─── HELPERS ───
   void _startHls(String waveId) async {
-    _hybrid = HybridAudioService();
+    final userId = context.read<AuthProvider>().userId;
+    if (userId == null) return;
     try {
-      await _hybrid!.joinRoom(waveId, 'oyente-${DateTime.now().millisecondsSinceEpoch}', isHost: false);
+      await _connectHybridVoice(waveId, userId, isHost: false);
     } catch (_) {}
   }
 
   void _initTrackProvider(String waveId) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       final userId = context.read<AuthProvider>().userId!;
       context.read<TrackProvider>().initialize(waveId);
       context.read<ChatProvider>().initialize(waveId, userId);
       context.read<VoiceProvider>().initialize(waveId, userId, isOwner: false);
       context.read<QualityProvider>().initialize(waveId, userId, isOwner: false);
       PlaybackSyncService.startAsListener(waveId);
-      MicStreamService.startListening(waveId);
       _listenChatNotifications();
       _listenEmisorReconnect();
       _listenReactions();
@@ -1377,7 +1389,7 @@ class _WaveHomeScreenState extends State<WaveHomeScreen> with WidgetsBindingObse
       if (hadWave && wp.currentWave == null) {
         MusicService.stopMusic();
         PlaybackSyncService.stop();
-        MicStreamService.stopListening();
+        _hybrid?.leaveRoom();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(

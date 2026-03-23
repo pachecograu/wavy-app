@@ -77,7 +77,7 @@ class MicStreamService {
       numChannels: 1,
       sampleRate: 16000,
       bufferSize: 8192,
-      interleaved: true,
+      interleaved: false, // mono audio: interleaving has no meaning, must be false
     );
 
     _socket.on('mic-audio-data', (data) {
@@ -85,8 +85,12 @@ class MicStreamService {
         final audioBase64 = data['audio']?.toString();
         if (audioBase64 != null && _player != null) {
           final bytes = Uint8List.fromList(base64Decode(audioBase64));
-          debugPrint('🎙️ Received mic chunk: ${bytes.length} bytes');
-          _player!.uint8ListSink?.add(bytes);
+          final sink = _player!.uint8ListSink;
+          if (sink != null) {
+            sink.add(bytes);
+          } else {
+            debugPrint('⚠️ MicStreamService: uint8ListSink is null, audio dropped');
+          }
         }
       } catch (e) {
         debugPrint('Error playing mic audio: $e');
