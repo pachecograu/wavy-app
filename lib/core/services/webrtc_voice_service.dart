@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../socket/socket_service.dart';
@@ -31,6 +30,7 @@ class WebRTCVoiceService {
   MediaStream? _localStream;
   bool _micEnabled = false;
   bool _initialized = false;
+  bool _handlersRegistered = false;
 
   String? _roomId;
   String? _userId;
@@ -46,6 +46,8 @@ class WebRTCVoiceService {
       {'urls': 'stun:stun2.l.google.com:19302'},
     ],
     'sdpSemantics': 'unified-plan',
+    'bundlePolicy': 'max-bundle',
+    'rtcpMuxPolicy': 'require',
   };
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -95,6 +97,11 @@ class WebRTCVoiceService {
     _userId = null;
     _isHost = false;
     _hostUserId = null;
+
+    if (_handlersRegistered) {
+      _unregisterSignalingHandlers();
+      _handlersRegistered = false;
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -119,7 +126,8 @@ class WebRTCVoiceService {
       }
       _micEnabled = true;
 
-      // Notify all listeners in the room so they can request an offer
+      // Notify listeners (only first time they should negotiate).
+      // Existing peers stay connected and will receive unmuted audio instantly.
       _socket.emit('mic_started', {});
 
       debugPrint('🎙️ Microphone enabled – broadcast mic_started');
@@ -135,6 +143,8 @@ class WebRTCVoiceService {
       t.enabled = false;
     }
     _micEnabled = false;
+    // Keep the WebRTC session alive. Do not close peer connections here.
+    // This avoids renegotiation delay on the next mic enable.
     _socket.emit('mic_stopped', {});
     debugPrint('🎙️ Microphone disabled');
   }
@@ -148,6 +158,9 @@ class WebRTCVoiceService {
   // ──────────────────────────────────────────────────────────────────────────
 
   void _registerSignalingHandlers() {
+    if (_handlersRegistered) return;
+    _handlersRegistered = true;
+
     // ── DJ-side ──────────────────────────────────────────────────────────────
 
     // Listener is requesting the DJ to create an WebRTC offer
@@ -178,6 +191,10 @@ class WebRTCVoiceService {
       final hId = data['hostUserId']?.toString();
       if (hId != null) _hostUserId = hId;
       if (!_isHost && _hostUserId != null) {
+        if (_hasUsableConnection(_hostUserId!)) {
+          debugPrint('🎙️ mic_started – existing WebRTC session reused');
+          return;
+        }
         debugPrint('🎙️ mic_started → requesting offer from $_hostUserId');
         _requestOffer(_hostUserId!);
       }
@@ -185,12 +202,8 @@ class WebRTCVoiceService {
 
     _socket.on('mic_stopped', (_) {
       if (!_isHost) {
-        // Close all peer connections since the DJ stopped mic
-        for (final pc in _pcs.values) {
-          pc.close();
-        }
-        _pcs.clear();
-        debugPrint('🎙️ mic_stopped – all peer connections closed');
+        // Keep existing connection alive and wait for next unmute.
+        debugPrint('🎙️ mic_stopped – keeping WebRTC session alive');
       }
     });
 
@@ -228,6 +241,16 @@ class WebRTCVoiceService {
       final uid = data['userId']?.toString();
       if (uid != null) _closePc(uid);
     });
+  }
+
+  void _unregisterSignalingHandlers() {
+    _socket.off('webrtc_offer_requested');
+    _socket.off('webrtc_answer');
+    _socket.off('mic_started');
+    _socket.off('mic_stopped');
+    _socket.off('webrtc_offer');
+    _socket.off('webrtc_ice_candidate');
+    _socket.off('webrtc_peer_disconnected');
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -269,6 +292,12 @@ class WebRTCVoiceService {
 
   Future<void> _createAndSendOffer(String listenerId) async {
     try {
+      if (_hasUsableConnection(listenerId)) {
+        debugPrint('🎙️ Reusing active PC for $listenerId (no new offer)');
+        return;
+      }
+
+      _closePc(listenerId);
       final pc = await _buildPc(listenerId);
 
       if (_localStream != null) {
@@ -295,6 +324,7 @@ class WebRTCVoiceService {
 
   Future<void> _handleOffer(String peerId, Map sdpMap) async {
     try {
+      _closePc(peerId);
       final pc = await _buildPc(peerId);
       await pc.setRemoteDescription(
         RTCSessionDescription(sdpMap['sdp'], sdpMap['type']),
@@ -319,5 +349,13 @@ class WebRTCVoiceService {
   void _closePc(String peerId) {
     _pcs.remove(peerId)?.close();
     debugPrint('🎙️ Closed PC with $peerId');
+  }
+
+  bool _hasUsableConnection(String peerId) {
+    final pc = _pcs[peerId];
+    if (pc == null) return false;
+    return pc.iceConnectionState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+        pc.iceConnectionState == RTCIceConnectionState.RTCIceConnectionStateCompleted ||
+        pc.connectionState == RTCPeerConnectionState.RTCPeerConnectionStateConnected;
   }
 }
